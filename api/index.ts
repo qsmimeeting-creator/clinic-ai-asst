@@ -239,84 +239,97 @@ app.post("/api/chat", async (req, res) => {
     // Shuffle keys to distribute load
     const shuffledKeys = [...envKeys].sort(() => Math.random() - 0.5);
     
+    // Prepare data once before trying different API keys
+    const processedFiles = await Promise.all(activeFiles.map(async (file: any) => {
+      let fileData = null;
+      if (file.inlineData) {
+        fileData = file.inlineData;
+      } else if (file.url) {
+        try {
+          const resp = await fetch(file.url);
+          const arrayBuffer = await resp.arrayBuffer();
+          fileData = Buffer.from(arrayBuffer).toString('base64');
+        } catch (e) {
+          console.error(`Error fetching file ${file.name}:`, e);
+        }
+      }
+      return { ...file, fileData };
+    }));
+
     let lastError = null;
-    let aiResponse = null;
+
+    // Prepare context once
+    let textContext = "ข้อมูลเอกสารของคลินิก:\n";
+    let mediaParts = [];
+    let hasText = false;
+
+    for (const file of processedFiles) {
+      const isMultimodal = file.mimeType && (
+        file.mimeType.startsWith('image/') || 
+        file.mimeType.startsWith('audio/') || 
+        file.mimeType.startsWith('video/') || 
+        file.mimeType === 'application/pdf'
+      );
+
+      if (isMultimodal) {
+        // สำหรับ PDF และสื่อต่างๆ ส่งไฟล์ดิบเพื่อให้ AI วิเคราะห์โครงสร้าง/ภาพ/เสียง
+        if (file.fileData) {
+          mediaParts.push({
+            inlineData: { mimeType: file.mimeType, data: file.fileData }
+          });
+        }
+        // ถ้ามีข้อความที่สกัดไว้แล้ว (เช่นจาก PDF) ก็ส่งไปด้วยเพื่อความเร็ว
+        if (file.content) {
+          textContext += `--- เนื้อหาจากไฟล์ ${file.name} ---\n${file.content}\n\n`;
+        } else {
+          textContext += `\n[แนบไฟล์สื่อ: ${file.name}]`;
+        }
+        hasText = true;
+      } else {
+        // สำหรับ Word, Excel, CSV, Text
+        // ส่งเฉพาะเนื้อหาที่สกัดได้ (Content) เท่านั้น ไม่ส่งไฟล์ดิบ (Redundancy Removal)
+        // เพราะการส่งไฟล์ดิบประเภทนี้ทำให้ AI ประมวลผลช้าลงและเปลือง Token โดยไม่จำเป็น
+        if (file.content) {
+          textContext += `--- เนื้อหาเอกสาร: ${file.name} ---\n${file.content}\n\n`;
+          hasText = true;
+        }
+      }
+    }
+
+    if (!hasText && mediaParts.length === 0) {
+      textContext = "ไม่มีข้อมูลเอกสารในระบบขณะนี้";
+    }
+
+    const requestParts = [];
+    if (hasText || mediaParts.length === 0) {
+      requestParts.push({ text: textContext });
+    }
+    requestParts.push(...mediaParts);
+    requestParts.push({ text: `คำถาม: ${query}` });
 
     // Try each key until one works or all fail
     for (const apiKey of shuffledKeys) {
       try {
         const ai = new GoogleGenAI({ apiKey });
         
-        // Prepare data for this attempt
-        const processedFiles = await Promise.all(activeFiles.map(async (file: any) => {
-          let fileData = null;
-          if (file.inlineData) {
-            fileData = file.inlineData;
-          } else if (file.url) {
-            try {
-              const resp = await fetch(file.url);
-              const arrayBuffer = await resp.arrayBuffer();
-              fileData = Buffer.from(arrayBuffer).toString('base64');
-            } catch (e) {
-              console.error(`Error fetching file ${file.name}:`, e);
-            }
-          }
-          return { ...file, fileData };
-        }));
-
-        let textContext = "ข้อมูลเอกสารของคลินิกที่เป็นข้อความ:\n";
-        let mediaParts = [];
-        let hasText = false;
-
-        for (const file of processedFiles) {
-          if (file.content) {
-            textContext += `--- เริ่มเนื้อหาเอกสาร: ${file.name} ---\n${file.content}\n--- จบเนื้อหาเอกสาร: ${file.name} ---\n\n`;
-            hasText = true;
-          }
-          if (file.fileData && file.mimeType) {
-            mediaParts.push({
-              inlineData: {
-                mimeType: file.mimeType,
-                data: file.fileData
-              }
-            });
-            if (!file.content) {
-              textContext += `\n[แนบไฟล์: ${file.name}]`;
-              hasText = true;
-            }
-          }
-        }
-
-        if (!hasText && mediaParts.length === 0) {
-          textContext = "ไม่มีข้อมูลเอกสารในระบบขณะนี้";
-        }
-
-        const requestParts = [];
-        if (hasText || mediaParts.length === 0) {
-          requestParts.push({ text: textContext });
-        }
-        requestParts.push(...mediaParts);
-        requestParts.push({ text: `คำถาม: ${query}` });
-
-        const response = await ai.models.generateContent({
+        const responseStream = await ai.models.generateContentStream({
           model: "gemini-3-flash-preview",
           contents: [{ role: "user", parts: requestParts }],
           config: {
-            systemInstruction: `คุณคือผู้ช่วย AI ของคลินิก หน้าที่ของคุณคือตอบคำถามของผู้ใช้งานโดยอ้างอิงจาก "ข้อมูลเอกสารของคลินิก" (ซึ่งอาจเป็นข้อความ, PDF, รูปภาพ, วีดีโอ หรือเสียง) ที่แนบมาให้เท่านั้น ห้ามคิดเอาเอง หรือใช้ความรู้นอกเหนือจากที่ให้ไปโดยเด็ดขาด
+            systemInstruction: `คุณคือผู้ช่วย AI ของคลินิก หน้าที่ของคุณคือตอบคำถามของผู้ใช้งานโดยอ้างอิงจาก "ข้อมูลเอกสารของคลินิก" ที่แนบมาให้เท่านั้น ห้ามคิดเอาเอง หรือใช้ความรู้นอกเหนือจากที่ให้ไปโดยเด็ดขาด
             
     การจัดรูปแบบคำตอบ (Formatting):
     - ใช้ Markdown ในการตอบเพื่อให้ดูสวยงามและอ่านง่าย
-    - **เน้นคำที่สำคัญ** หรือตัวเลขที่สำคัญด้วยตัวหนา (Bold) เช่น **ราคา 500 บาท**, **เปิด 8:30 น.**
-    - ใช้รายการแบบจุด (Bullet points) หรือลำดับตัวเลขสำหรับข้อมูลที่เป็นรายการ
-    - ใช้ตาราง (Table) หากข้อมูลมีความซับซ้อนและต้องการเปรียบเทียบ
-    - เว้นวรรคและขึ้นบรรทัดใหม่ให้เหมาะสมเพื่อให้อ่านง่ายบนมือถือ
+    - **เน้นคำที่สำคัญ** หรือตัวเลขที่สำคัญด้วยตัวหนา (Bold)
+    - ใช้รายการแบบจุด (Bullet points) หรือลำดับตัวเลข
+    - ใช้ตาราง (Table) หากข้อมูลมีความซับซ้อน
     
     กฎเกณฑ์:
-    1. การตอบคำถาม: ให้ตอบอย่าง "สั้น กระชับ และเข้าใจง่าย" (Concise and Clear) หลีกเลี่ยงการใช้คำฟุ่มเฟือย
+    1. การตอบคำถาม: ให้ตอบอย่าง "สั้น กระชับ และเข้าใจง่าย"
     2. หากคำถามเป็นเรื่องการวินิจฉัยโรค สั่งยา หรืออาการเจ็บป่วย ให้กำหนด status เป็น "out_of_scope" และแนะนำให้พบแพทย์
-    3. หากคำถามกำกวม หรือกว้างเกินไป (Broad/Ambiguous) เช่น "มีอะไรบ้าง", "ราคาเท่าไหร่" (โดยไม่ระบุบริการ), "ขอข้อมูลหน่อย" ให้กำหนด status เป็น "clarification_needed" และตอบกลับโดยขอให้ผู้ใช้ระบุสิ่งที่ต้องการทราบให้ชัดเจนยิ่งขึ้น เช่น "ต้องการทราบราคาของบริการใดเป็นพิเศษครับ?" หรือ "ต้องการข้อมูลในส่วนไหนครับ?"
+    3. หากคำถามกำกวม หรือกว้างเกินไป ให้กำหนด status เป็น "clarification_needed" และขอข้อมูลเพิ่ม
     4. หากข้อมูลในเอกสารขัดแย้งกันเอง ให้กำหนด status เป็น "conflict_detected"
-    5. หากค้นหาในเอกสารที่แนบไปทั้งหมดแล้ว "ไม่พบข้อมูลเลย" ให้กำหนด status เป็น "no_answer"
+    5. หากไม่พบข้อมูลเลย ให้กำหนด status เป็น "no_answer"
     6. หากตอบได้ ให้กำหนด status เป็น "answered" พร้อมใส่ชื่อไฟล์ที่ใช้อ้างอิงลงใน array citations`,
             temperature: 0.1,
             thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
@@ -325,16 +338,16 @@ app.post("/api/chat", async (req, res) => {
               type: Type.OBJECT,
               properties: {
                 status: { type: Type.STRING, enum: ["answered", "no_answer", "clarification_needed", "out_of_scope", "conflict_detected"] },
-                short_answer: { type: Type.STRING, description: "คำตอบแบบสั้นๆ หรือสรุป" },
-                answer: { type: Type.STRING, description: "คำตอบแบบละเอียด หรือคำถามเพื่อขอความชัดเจน" },
-                confidence: { type: Type.NUMBER, description: "ความมั่นใจ 0-1" },
+                short_answer: { type: Type.STRING },
+                answer: { type: Type.STRING },
+                confidence: { type: Type.NUMBER },
                 citations: {
                   type: Type.ARRAY,
                   items: {
                     type: Type.OBJECT,
                     properties: {
                       file_name: { type: Type.STRING },
-                      locator: { type: Type.STRING, description: "ระบุตำแหน่งคร่าวๆ เช่น หน้า 2, นาทีที่ 1:20" }
+                      locator: { type: Type.STRING }
                     }
                   }
                 }
@@ -344,33 +357,38 @@ app.post("/api/chat", async (req, res) => {
           }
         });
 
-        if (response.text) {
-          aiResponse = JSON.parse(response.text);
-          break; // Success! Exit the loop
-        } else {
-          throw new Error("Empty response from AI");
+        // Setup SSE for streaming
+        res.setHeader('Content-Type', 'text/event-stream');
+        res.setHeader('Cache-Control', 'no-cache');
+        res.setHeader('Connection', 'keep-alive');
+        res.setHeader('X-Accel-Buffering', 'no'); // Disable buffering for Nginx
+
+        for await (const chunk of responseStream) {
+          if (chunk.text) {
+            res.write(`data: ${JSON.stringify({ chunk: chunk.text })}\n\n`);
+          }
         }
+        
+        res.write(`data: [DONE]\n\n`);
+        res.end();
+        return; // Success! Exit the loop and function
+
       } catch (error: any) {
         lastError = error;
         const errorMsg = error.message || "";
-        // If it's a quota error (429), continue to next key
         if (errorMsg.includes("429") || errorMsg.toLowerCase().includes("quota") || errorMsg.toLowerCase().includes("too many requests")) {
           console.warn(`API Key quota exceeded, trying next key...`);
           continue;
         } else {
-          // For other errors, we might want to stop or continue. 
-          // Let's continue for now to be robust.
           console.error(`API Error with current key:`, errorMsg);
           continue;
         }
       }
     }
 
-    if (aiResponse) {
-      res.json(aiResponse);
-    } else {
-      throw lastError || new Error("All API keys failed or were exhausted.");
-    }
+    // If we get here, all keys failed
+    res.status(500).write(`data: ${JSON.stringify({ error: "All API keys failed or were exhausted." })}\n\n`);
+    res.end();
   } catch (error: any) {
     console.error("Gemini API error:", error);
     res.status(500).json({

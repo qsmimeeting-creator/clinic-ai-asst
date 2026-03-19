@@ -5,30 +5,20 @@ import * as XLSX from 'xlsx';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 
+interface Message {
+  id: number;
+  sender: string;
+  type: string;
+  text: string;
+  isStreaming?: boolean;
+  short_answer?: string;
+  citations?: any[];
+  conflicts?: any[];
+  missing_fields?: any[];
+}
+
 // --- REAL AI BACKEND (Using Gemini API with Context Stuffing & Multimodal) ---
-const callGeminiAPI = async (query, activeFiles) => {
-  try {
-    const response = await fetch('/api/chat', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ query, activeFiles })
-    });
-
-    const data = await response.json();
-    
-    if (!response.ok) {
-      throw new Error(data.error || "Failed to call AI API");
-    }
-
-    return data;
-  } catch (error) {
-    console.error("Gemini API error:", error);
-    return {
-      status: "system_error",
-      answer: "ขออภัยครับ ระบบเชื่อมต่อ AI มีปัญหาชั่วคราว"
-    };
-  }
-};
+// callGeminiAPI removed and integrated into processMessage for streaming support
 
 // --- ADMIN COMPONENT ---
 const AdminPanel = ({ files, setFiles, categories, setCategories }) => {
@@ -614,7 +604,7 @@ export default function App() {
     fetchData();
   }, []);
 
-  const [messages, setMessages] = useState([
+  const [messages, setMessages] = useState<Message[]>([
     {
       id: 1,
       sender: 'bot',
@@ -721,29 +711,117 @@ export default function App() {
     setMessages(prev => [...prev, userMsg]);
     setIsTyping(true);
 
+    const botMsgId = Date.now() + 1;
+    // เพิ่มข้อความเริ่มต้นของ AI (สถานะกำลังพิมพ์)
+    setMessages(prev => [...prev, {
+      id: botMsgId,
+      sender: 'bot',
+      type: 'answered',
+      text: '',
+      isStreaming: true
+    }]);
+
     try {
       const activeFiles = files.filter(f => f.status === 'active');
-      const response = await callGeminiAPI(text, activeFiles);
       
-      const botMsg = {
-        id: Date.now() + 1,
-        sender: 'bot',
-        type: response.status || 'answered',
-        text: response.answer || 'เกิดข้อผิดพลาดในการประมวลผลคำตอบ',
-        short_answer: response.short_answer,
-        citations: response.citations,
-        conflicts: response.conflicts,
-        missing_fields: response.missing_fields
-      };
+      const response = await fetch('/api/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ query: text, activeFiles })
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.error || "Failed to connect to AI");
+      }
+
+      const reader = response.body?.getReader();
+      if (!reader) throw new Error("ReadableStream not supported");
+
+      const decoder = new TextDecoder();
+      let fullRawResponse = '';
+      let buffer = '';
       
-      setMessages(prev => [...prev, botMsg]);
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
+        
+        for (const line of lines) {
+          const trimmedLine = line.trim();
+          if (trimmedLine.startsWith('data: ')) {
+            const dataStr = trimmedLine.slice(6).trim();
+            if (dataStr === '[DONE]') break;
+            
+            try {
+              const data = JSON.parse(dataStr);
+              if (data.chunk) {
+                fullRawResponse += data.chunk;
+                
+                // พยายามดึงคำตอบจาก JSON ที่กำลังสตรีมมา (ใช้ Regex สำหรับ Partial JSON)
+                let displayAnswer = "";
+                
+                // ค้นหาเนื้อหาในฟิลด์ "answer"
+                const answerMatch = fullRawResponse.match(/"answer":\s*"((?:[^"\\]|\\.)*)/);
+                if (answerMatch) {
+                  displayAnswer = answerMatch[1]
+                    .replace(/\\n/g, '\n')
+                    .replace(/\\"/g, '"')
+                    .replace(/\\\\/g, '\\')
+                    .replace(/\\t/g, '\t');
+                } else if (fullRawResponse.trim().startsWith('{')) {
+                  displayAnswer = "กำลังประมวลผลคำตอบ...";
+                } else {
+                  displayAnswer = fullRawResponse;
+                }
+
+                setMessages(prev => prev.map(m => 
+                  m.id === botMsgId ? { ...m, text: displayAnswer } : m
+                ));
+              }
+            } catch (e) {
+              // ข้ามข้อผิดพลาดในการ parse สำหรับ chunk ที่ไม่สมบูรณ์
+            }
+          }
+        }
+      }
+
+      // เมื่อสตรีมจบ พยายาม parse JSON ตัวเต็มเพื่อดึง metadata อื่นๆ
+      try {
+        const finalData = JSON.parse(fullRawResponse);
+        setMessages(prev => prev.map(m => 
+          m.id === botMsgId ? {
+            ...m,
+            type: finalData.status || 'answered',
+            text: finalData.answer || m.text,
+            short_answer: finalData.short_answer,
+            citations: finalData.citations,
+            conflicts: finalData.conflicts,
+            missing_fields: finalData.missing_fields,
+            isStreaming: false
+          } : m
+        ));
+      } catch (e) {
+        console.error("Final JSON parse error:", e);
+        setMessages(prev => prev.map(m => 
+          m.id === botMsgId ? { ...m, isStreaming: false } : m
+        ));
+      }
+
     } catch (error) {
-      setMessages(prev => [...prev, {
-        id: Date.now() + 1,
-        sender: 'bot',
-        type: 'system_error',
-        text: 'ขออภัยครับ ระบบประมวลผลขัดข้องชั่วคราว กรุณาลองใหม่อีกครั้ง หรืออาจเป็นเพราะไฟล์แนบมีขนาดใหญ่เกินกว่าที่ API จะรับได้ในครั้งเดียว'
-      }]);
+      console.error("Chat error:", error);
+      setMessages(prev => prev.map(m => 
+        m.id === botMsgId ? {
+          id: m.id,
+          sender: 'bot',
+          type: 'system_error',
+          text: 'ขออภัยครับ ระบบประมวลผลขัดข้องชั่วคราว กรุณาลองใหม่อีกครั้ง หรืออาจเป็นเพราะไฟล์แนบมีขนาดใหญ่เกินไป',
+          isStreaming: false
+        } : m
+      ));
     } finally {
       setIsTyping(false);
     }
@@ -769,9 +847,17 @@ export default function App() {
               <p className="font-bold text-[#B11226] text-lg border-b pb-2 border-gray-100">{msg.short_answer}</p>
             )}
             <div className="markdown-body text-[#333333] leading-relaxed">
-              <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                {msg.text}
-              </ReactMarkdown>
+              {msg.text === '' && msg.isStreaming ? (
+                <div className="flex space-x-1 items-center h-6">
+                  <div className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce"></div>
+                  <div className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce [animation-delay:0.2s]"></div>
+                  <div className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce [animation-delay:0.4s]"></div>
+                </div>
+              ) : (
+                <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                  {msg.text + (msg.isStreaming ? ' ▮' : '')}
+                </ReactMarkdown>
+              )}
             </div>
             
             {msg.citations && msg.citations.length > 0 && (
@@ -994,7 +1080,7 @@ export default function App() {
                 </div>
               ))}
 
-              {isTyping && (
+              {isTyping && !messages.some(m => m.isStreaming) && (
                 <div className="flex justify-start">
                   <div className="flex flex-row max-w-[80%]">
                     <div className="flex-shrink-0 h-8 w-8 rounded-full bg-[#fad4d8] mr-3 flex items-center justify-center overflow-hidden">
