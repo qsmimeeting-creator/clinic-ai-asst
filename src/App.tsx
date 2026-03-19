@@ -884,9 +884,24 @@ export default function App() {
 
       case 'clarification_needed':
         return (
-          <div className="flex items-start space-x-2">
-            <Search className="text-orange-500 mt-0.5 flex-shrink-0" size={18} />
-            <p className="text-[#333333]">{msg.text}</p>
+          <div className="space-y-3">
+            <div className="flex items-start space-x-2">
+              <Search className="text-orange-500 mt-0.5 flex-shrink-0" size={18} />
+              <p className="text-[#333333]">{msg.text}</p>
+            </div>
+            {msg.missing_fields && msg.missing_fields.length > 0 && (
+              <div className="bg-orange-50 p-3 rounded-md border border-orange-100 text-sm">
+                <p className="font-semibold text-orange-800 mb-2">ข้อมูลที่ต้องการเพิ่มเติม:</p>
+                <ul className="list-none space-y-1.5">
+                  {msg.missing_fields.map((field, idx) => (
+                    <li key={idx} className="flex items-start text-orange-700">
+                      <span className="inline-block w-4 text-center mr-1">•</span>
+                      <span>{field}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
           </div>
         );
 
@@ -981,10 +996,8 @@ export default function App() {
                 {currentView === 'admin' ? 'Knowledge Management' : 'Clinic AI Assistant'}
               </h1>
               <p className="text-[#fad4d8] text-[10px] sm:text-xs flex items-center mt-0.5 truncate">
-                {currentView === 'admin' ? (
+                {currentView === 'admin' && (
                   <><Database size={10} className="mr-1 shrink-0" /> ระบบจัดการฐานความรู้หลังบ้าน</>
-                ) : (
-                  <><Clock size={10} className="mr-1 shrink-0" /> Source-Grounded RAG System</>
                 )}
               </p>
             </div>
@@ -1139,11 +1152,6 @@ export default function App() {
                     <Send size={18} className={inputValue.trim() && !isTyping ? 'ml-0.5' : ''} />
                   </button>
                 </form>
-                <div className="text-center mt-2">
-                  <p className="text-[10px] text-gray-400">
-                    ระบบตอบคำถามโดยอ้างอิงจากฐานข้อมูลเอกสารของคลินิกเท่านั้น (Strict Source-Grounded)
-                  </p>
-                </div>
               </div>
 
             </div>

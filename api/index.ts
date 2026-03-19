@@ -324,13 +324,17 @@ app.post("/api/chat", async (req, res) => {
     - ใช้รายการแบบจุด (Bullet points) หรือลำดับตัวเลข
     - ใช้ตาราง (Table) หากข้อมูลมีความซับซ้อน
     
-    กฎเกณฑ์:
+    กฎเกณฑ์การประมวลผล:
     1. การตอบคำถาม: ให้ตอบอย่าง "สั้น กระชับ และเข้าใจง่าย"
-    2. หากคำถามเป็นเรื่องการวินิจฉัยโรค สั่งยา หรืออาการเจ็บป่วย ให้กำหนด status เป็น "out_of_scope" และแนะนำให้พบแพทย์
-    3. หากคำถามกำกวม หรือกว้างเกินไป ให้กำหนด status เป็น "clarification_needed" และขอข้อมูลเพิ่ม
-    4. หากข้อมูลในเอกสารขัดแย้งกันเอง ให้กำหนด status เป็น "conflict_detected"
-    5. หากไม่พบข้อมูลเลย ให้กำหนด status เป็น "no_answer"
-    6. หากตอบได้ ให้กำหนด status เป็น "answered" พร้อมใส่ชื่อไฟล์ที่ใช้อ้างอิงลงใน array citations`,
+    2. การวินิจฉัย/การแพทย์: หากคำถามเป็นเรื่องการวินิจฉัยโรค สั่งยา หรืออาการเจ็บป่วย ให้กำหนด status เป็น "out_of_scope" และแนะนำให้พบแพทย์
+    3. การตรวจจับความกำกวม (Ambiguity Detection): 
+       - หากคำถามกว้างเกินไป (เช่น "มีอะไรบ้าง", "ขอรายละเอียดหน่อย") 
+       - หรือคำถามกำกวมที่อาจตีความได้หลายทางในบริบทของคลินิก
+       - ให้กำหนด status เป็น "clarification_needed" 
+       - ในส่วน answer ให้ระบุว่าคำถามกว้างเกินไป และเสนอหัวข้อที่เกี่ยวข้องจากเอกสารเพื่อให้ผู้ใช้เลือกถามเฉพาะเจาะจงมากขึ้น
+    4. ความขัดแย้งของข้อมูล: หากข้อมูลในเอกสารขัดแย้งกันเอง ให้กำหนด status เป็น "conflict_detected"
+    5. ไม่พบข้อมูล: หากไม่พบข้อมูลเลย ให้กำหนด status เป็น "no_answer"
+    6. ตอบคำถามได้: หากตอบได้ชัดเจน ให้กำหนด status เป็น "answered" พร้อมใส่ชื่อไฟล์ที่ใช้อ้างอิงลงใน array citations`,
             temperature: 0.1,
             thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
             responseMimeType: "application/json",
@@ -341,6 +345,11 @@ app.post("/api/chat", async (req, res) => {
                 short_answer: { type: Type.STRING },
                 answer: { type: Type.STRING },
                 confidence: { type: Type.NUMBER },
+                missing_fields: {
+                  type: Type.ARRAY,
+                  items: { type: Type.STRING },
+                  description: "รายการข้อมูลที่ขาดหายไปหรือต้องการความชัดเจนเพิ่ม"
+                },
                 citations: {
                   type: Type.ARRAY,
                   items: {
