@@ -3,7 +3,7 @@ import { put, del } from "@vercel/blob";
 import { createClient } from "@vercel/kv";
 import path from "path";
 import { fileURLToPath } from "url";
-import { GoogleGenAI, Type } from "@google/genai";
+import { GoogleGenAI, Type, ThinkingLevel } from "@google/genai";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -239,18 +239,13 @@ app.post("/api/chat", async (req, res) => {
     const apiKey = envKeys[Math.floor(Math.random() * envKeys.length)];
     const ai = new GoogleGenAI({ apiKey });
 
-    let textContext = "ข้อมูลเอกสารของคลินิกที่เป็นข้อความ:\n";
-    let mediaParts = [];
-    let hasText = false;
-
-    for (const file of activeFiles) {
+    // 1. Fetch all file data in parallel to save time
+    const processedFiles = await Promise.all(activeFiles.map(async (file: any) => {
       let fileData = null;
       
-      // If file has inlineData (small files), use it
       if (file.inlineData) {
         fileData = file.inlineData;
       } else if (file.url) {
-        // Fetch from Blob if not inline
         try {
           const resp = await fetch(file.url);
           const arrayBuffer = await resp.arrayBuffer();
@@ -259,17 +254,26 @@ app.post("/api/chat", async (req, res) => {
           console.error(`Error fetching file ${file.name}:`, e);
         }
       }
+      return { ...file, fileData };
+    }));
 
-      if (fileData && file.mimeType && (file.mimeType.startsWith('image/') || file.mimeType.startsWith('audio/') || file.mimeType.startsWith('video/') || file.mimeType === 'application/pdf')) {
+    let textContext = "ข้อมูลเอกสารของคลินิกที่เป็นข้อความ:\n";
+    let mediaParts = [];
+    let hasText = false;
+
+    for (const file of processedFiles) {
+      if (file.fileData && file.mimeType && (file.mimeType.startsWith('image/') || file.mimeType.startsWith('audio/') || file.mimeType.startsWith('video/') || file.mimeType === 'application/pdf')) {
+        // สำหรับไฟล์ Media/PDF
         mediaParts.push({
           inlineData: {
             mimeType: file.mimeType,
-            data: fileData
+            data: file.fileData
           }
         });
         textContext += `\n[แนบไฟล์ Media/PDF: ${file.name}]`;
         hasText = true;
       } else if (file.content) {
+        // สำหรับ Text, CSV, Excel ที่ถูกแปลงเป็นข้อความแล้ว
         textContext += `--- เริ่มเอกสาร: ${file.name} ---\n${file.content}\n--- จบเอกสาร: ${file.name} ---\n\n`;
         hasText = true;
       }
@@ -307,6 +311,7 @@ app.post("/api/chat", async (req, res) => {
 5. หากค้นหาในเอกสารที่แนบไปทั้งหมดแล้ว "ไม่พบข้อมูลเลย" ให้กำหนด status เป็น "no_answer"
 6. หากตอบได้ ให้กำหนด status เป็น "answered" พร้อมใส่ชื่อไฟล์ที่ใช้อ้างอิงลงใน array citations`,
         temperature: 0.1,
+        thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
         responseMimeType: "application/json",
         responseSchema: {
           type: Type.OBJECT,
