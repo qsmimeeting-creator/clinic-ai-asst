@@ -1,0 +1,5 @@
+{
+  "name": "Clinic AI Assistant",
+  "description": "A RAG-based AI assistant for clinic information, supporting multimodal documents.",
+  "requestFramePermissions": []
+}
