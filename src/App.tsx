@@ -350,7 +350,6 @@ export default function App() {
                   msg={msg} 
                   speakingId={speakingId} 
                   toggleSpeech={toggleSpeech} 
-                  onSuggestionClick={(text) => setInputValue(text)}
                 />
               ))}
 

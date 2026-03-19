@@ -19,10 +19,9 @@ interface MessageItemProps {
   msg: Message;
   speakingId: number | null;
   toggleSpeech: (text: string, id: number) => void;
-  onSuggestionClick?: (text: string) => void;
 }
 
-const MessageItem = memo(({ msg, speakingId, toggleSpeech, onSuggestionClick }: MessageItemProps) => {
+const MessageItem = memo(({ msg, speakingId, toggleSpeech }: MessageItemProps) => {
   const renderBotMessageContent = () => {
     switch (msg.type) {
       case 'welcome':
@@ -88,14 +87,13 @@ const MessageItem = memo(({ msg, speakingId, toggleSpeech, onSuggestionClick }: 
                 <p className="text-xs font-medium text-gray-500 mb-2 uppercase tracking-wider">กรุณาระบุข้อมูลดังนี้:</p>
                 <div className="flex flex-wrap gap-2">
                   {msg.missing_fields.map((field, idx) => (
-                    <button 
+                    <div 
                       key={idx} 
-                      onClick={() => onSuggestionClick?.(field)}
-                      className="bg-white border border-orange-200 text-orange-700 px-3 py-1.5 rounded-lg text-sm shadow-sm flex items-center hover:bg-orange-50 transition-colors cursor-pointer"
+                      className="bg-white border border-orange-200 text-orange-700 px-3 py-1.5 rounded-lg text-sm shadow-sm flex items-center"
                     >
                       <span className="w-1.5 h-1.5 bg-orange-400 rounded-full mr-2"></span>
                       {field}
-                    </button>
+                    </div>
                   ))}
                 </div>
               </div>
