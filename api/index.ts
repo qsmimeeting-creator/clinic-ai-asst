@@ -221,6 +221,22 @@ app.post("/api/files/:id/status", async (req, res) => {
   }
 });
 
+// In-memory cache for file contents to reduce Blob/KV calls
+const fileContentCache: Record<string, { data: string, timestamp: number }> = {};
+const CACHE_TTL = 1000 * 60 * 60; // 1 hour
+
+// Basic text chunking for large documents
+const chunkText = (text: string, maxChunkSize: number = 4000) => {
+  if (text.length <= maxChunkSize) return [text];
+  const chunks = [];
+  let currentPos = 0;
+  while (currentPos < text.length) {
+    chunks.push(text.substring(currentPos, currentPos + maxChunkSize));
+    currentPos += maxChunkSize - 200; // 200 character overlap
+  }
+  return chunks;
+};
+
 // Gemini Chat API (Server-side for security)
 app.post("/api/chat", async (req, res) => {
   try {
@@ -241,6 +257,12 @@ app.post("/api/chat", async (req, res) => {
     
     // Prepare data once before trying different API keys
     const processedFiles = await Promise.all(activeFiles.map(async (file: any) => {
+      // Check cache first
+      const cacheKey = `content_${file.id}`;
+      if (fileContentCache[cacheKey] && (Date.now() - fileContentCache[cacheKey].timestamp < CACHE_TTL)) {
+        return { ...file, fileData: fileContentCache[cacheKey].data };
+      }
+
       let fileData = null;
       if (file.inlineData) {
         fileData = file.inlineData;
@@ -249,6 +271,9 @@ app.post("/api/chat", async (req, res) => {
           const resp = await fetch(file.url);
           const arrayBuffer = await resp.arrayBuffer();
           fileData = Buffer.from(arrayBuffer).toString('base64');
+          
+          // Cache the data
+          fileContentCache[cacheKey] = { data: fileData, timestamp: Date.now() };
         } catch (e) {
           console.error(`Error fetching file ${file.name}:`, e);
         }
@@ -258,7 +283,7 @@ app.post("/api/chat", async (req, res) => {
 
     let lastError = null;
 
-    // Prepare context once
+    // Prepare context once with chunking for large text
     let textContext = "ข้อมูลเอกสารของคลินิก:\n";
     let mediaParts = [];
     let hasText = false;
@@ -272,25 +297,22 @@ app.post("/api/chat", async (req, res) => {
       );
 
       if (isMultimodal) {
-        // สำหรับ PDF และสื่อต่างๆ ส่งไฟล์ดิบเพื่อให้ AI วิเคราะห์โครงสร้าง/ภาพ/เสียง
         if (file.fileData) {
           mediaParts.push({
             inlineData: { mimeType: file.mimeType, data: file.fileData }
           });
         }
-        // ถ้ามีข้อความที่สกัดไว้แล้ว (เช่นจาก PDF) ก็ส่งไปด้วยเพื่อความเร็ว
         if (file.content) {
-          textContext += `--- เนื้อหาจากไฟล์ ${file.name} ---\n${file.content}\n\n`;
+          const chunks = chunkText(file.content, 3000);
+          textContext += `--- เนื้อหาจากไฟล์ ${file.name} ---\n${chunks[0]}\n\n`; // Use first chunk for context if too large
         } else {
           textContext += `\n[แนบไฟล์สื่อ: ${file.name}]`;
         }
         hasText = true;
       } else {
-        // สำหรับ Word, Excel, CSV, Text
-        // ส่งเฉพาะเนื้อหาที่สกัดได้ (Content) เท่านั้น ไม่ส่งไฟล์ดิบ (Redundancy Removal)
-        // เพราะการส่งไฟล์ดิบประเภทนี้ทำให้ AI ประมวลผลช้าลงและเปลือง Token โดยไม่จำเป็น
         if (file.content) {
-          textContext += `--- เนื้อหาเอกสาร: ${file.name} ---\n${file.content}\n\n`;
+          const chunks = chunkText(file.content, 5000);
+          textContext += `--- เนื้อหาเอกสาร: ${file.name} ---\n${chunks.join('\n[...]\n')}\n\n`;
           hasText = true;
         }
       }
@@ -334,7 +356,12 @@ app.post("/api/chat", async (req, res) => {
        - ในส่วน answer ให้ระบุว่าคำถามกว้างเกินไป และเสนอหัวข้อที่เกี่ยวข้องจากเอกสารเพื่อให้ผู้ใช้เลือกถามเฉพาะเจาะจงมากขึ้น
     4. ความขัดแย้งของข้อมูล: หากข้อมูลในเอกสารขัดแย้งกันเอง ให้กำหนด status เป็น "conflict_detected"
     5. ไม่พบข้อมูล: หากไม่พบข้อมูลเลย ให้กำหนด status เป็น "no_answer"
-    6. ตอบคำถามได้: หากตอบได้ชัดเจน ให้กำหนด status เป็น "answered" พร้อมใส่ชื่อไฟล์ที่ใช้อ้างอิงลงใน array citations`,
+    6. ตอบคำถามได้: หากตอบได้ชัดเจน ให้กำหนด status เป็น "answered" พร้อมใส่ชื่อไฟล์ที่ใช้อ้างอิงลงใน array citations
+    
+    ขั้นตอนการตรวจสอบ (Self-Correction):
+    - ก่อนส่งคำตอบ ให้ตรวจสอบอีกครั้งว่าข้อมูลทั้งหมดมีอยู่ในเอกสารจริงหรือไม่
+    - หากพบว่าคำตอบมีส่วนที่ "คิดเอาเอง" หรือ "ใช้ความรู้ภายนอก" ให้ตัดส่วนนั้นออกทันที
+    - หากข้อมูลไม่เพียงพอที่จะตอบได้อย่างมั่นใจ ให้ใช้ status "no_answer" หรือ "clarification_needed" แทน`,
             temperature: 0.1,
             thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
             responseMimeType: "application/json",
