@@ -3,6 +3,7 @@ import { put, del } from "@vercel/blob";
 import { createClient } from "@vercel/kv";
 import path from "path";
 import { fileURLToPath } from "url";
+import { GoogleGenAI, Type } from "@google/genai";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -217,6 +218,130 @@ app.post("/api/files/:id/status", async (req, res) => {
     res.json({ success: true });
   } catch (error) {
     res.status(500).json({ error: "Failed to update status" });
+  }
+});
+
+// Gemini Chat API (Server-side for security)
+app.post("/api/chat", async (req, res) => {
+  try {
+    const { query, activeFiles } = req.body;
+    
+    // 1. Get Key from Environment Variable
+    const envKeys = (process.env.GEMINI_API_KEY || "")
+      .split(',')
+      .map(k => k.trim())
+      .filter(k => k !== "");
+    
+    if (envKeys.length === 0) {
+      return res.status(500).json({ error: "Missing Gemini API Key in Vercel Environment Variables." });
+    }
+
+    const apiKey = envKeys[Math.floor(Math.random() * envKeys.length)];
+    const ai = new GoogleGenAI({ apiKey });
+
+    let textContext = "ข้อมูลเอกสารของคลินิกที่เป็นข้อความ:\n";
+    let mediaParts = [];
+    let hasText = false;
+
+    for (const file of activeFiles) {
+      let fileData = null;
+      
+      // If file has inlineData (small files), use it
+      if (file.inlineData) {
+        fileData = file.inlineData;
+      } else if (file.url) {
+        // Fetch from Blob if not inline
+        try {
+          const resp = await fetch(file.url);
+          const arrayBuffer = await resp.arrayBuffer();
+          fileData = Buffer.from(arrayBuffer).toString('base64');
+        } catch (e) {
+          console.error(`Error fetching file ${file.name}:`, e);
+        }
+      }
+
+      if (fileData && file.mimeType && (file.mimeType.startsWith('image/') || file.mimeType.startsWith('audio/') || file.mimeType.startsWith('video/') || file.mimeType === 'application/pdf')) {
+        mediaParts.push({
+          inlineData: {
+            mimeType: file.mimeType,
+            data: fileData
+          }
+        });
+        textContext += `\n[แนบไฟล์ Media/PDF: ${file.name}]`;
+        hasText = true;
+      } else if (file.content) {
+        textContext += `--- เริ่มเอกสาร: ${file.name} ---\n${file.content}\n--- จบเอกสาร: ${file.name} ---\n\n`;
+        hasText = true;
+      }
+    }
+
+    if (!hasText && mediaParts.length === 0) {
+      textContext = "ไม่มีข้อมูลเอกสารในระบบขณะนี้";
+    }
+
+    const requestParts = [];
+    if (hasText || mediaParts.length === 0) {
+      requestParts.push({ text: textContext });
+    }
+    requestParts.push(...mediaParts);
+    requestParts.push({ text: `คำถาม: ${query}` });
+
+    const response = await ai.models.generateContent({
+      model: "gemini-3-flash-preview",
+      contents: [{ role: "user", parts: requestParts }],
+      config: {
+        systemInstruction: `คุณคือผู้ช่วย AI ของคลินิก หน้าที่ของคุณคือตอบคำถามของผู้ใช้งานโดยอ้างอิงจาก "ข้อมูลเอกสารของคลินิก" (ซึ่งอาจเป็นข้อความ, PDF, รูปภาพ, วีดีโอ หรือเสียง) ที่แนบมาให้เท่านั้น ห้ามคิดเอาเอง หรือใช้ความรู้นอกเหนือจากที่ให้ไปโดยเด็ดขาด
+        
+การจัดรูปแบบคำตอบ (Formatting):
+- ใช้ Markdown ในการตอบเพื่อให้ดูสวยงามและอ่านง่าย
+- **เน้นคำที่สำคัญ** หรือตัวเลขที่สำคัญด้วยตัวหนา (Bold) เช่น **ราคา 500 บาท**, **เปิด 8:30 น.**
+- ใช้รายการแบบจุด (Bullet points) หรือลำดับตัวเลขสำหรับข้อมูลที่เป็นรายการ
+- ใช้ตาราง (Table) หากข้อมูลมีความซับซ้อนและต้องการเปรียบเทียบ
+- เว้นวรรคและขึ้นบรรทัดใหม่ให้เหมาะสมเพื่อให้อ่านง่ายบนมือถือ
+
+กฎเกณฑ์:
+1. การตอบคำถาม: ให้ตอบอย่าง "สั้น กระชับ และเข้าใจง่าย" (Concise and Clear) หลีกเลี่ยงการใช้คำฟุ่มเฟือย
+2. หากคำถามเป็นเรื่องการวินิจฉัยโรค สั่งยา หรืออาการเจ็บป่วย ให้กำหนด status เป็น "out_of_scope" และแนะนำให้พบแพทย์
+3. หากคำถามกำกวม ให้กำหนด status เป็น "clarification_needed"
+4. หากข้อมูลในเอกสารขัดแย้งกันเอง ให้กำหนด status เป็น "conflict_detected"
+5. หากค้นหาในเอกสารที่แนบไปทั้งหมดแล้ว "ไม่พบข้อมูลเลย" ให้กำหนด status เป็น "no_answer"
+6. หากตอบได้ ให้กำหนด status เป็น "answered" พร้อมใส่ชื่อไฟล์ที่ใช้อ้างอิงลงใน array citations`,
+        temperature: 0.1,
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            status: { type: Type.STRING, enum: ["answered", "no_answer", "clarification_needed", "out_of_scope", "conflict_detected"] },
+            short_answer: { type: Type.STRING, description: "คำตอบแบบสั้นๆ หรือสรุป" },
+            answer: { type: Type.STRING, description: "คำตอบแบบละเอียด" },
+            confidence: { type: Type.NUMBER, description: "ความมั่นใจ 0-1" },
+            citations: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  file_name: { type: Type.STRING },
+                  locator: { type: Type.STRING, description: "ระบุตำแหน่งคร่าวๆ เช่น หน้า 2, นาทีที่ 1:20" }
+                }
+              }
+            }
+          },
+          required: ["status", "answer"]
+        }
+      }
+    });
+
+    if (response.text) {
+      res.json(JSON.parse(response.text));
+    } else {
+      throw new Error("Empty response from AI");
+    }
+  } catch (error: any) {
+    console.error("Gemini API error:", error);
+    res.status(500).json({
+      status: "system_error",
+      answer: "ขออภัยครับ ระบบเชื่อมต่อ AI มีปัญหาชั่วคราว"
+    });
   }
 });
 
