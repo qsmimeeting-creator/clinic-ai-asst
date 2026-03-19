@@ -288,7 +288,7 @@ export default function App() {
         </div>
       ) : (
         <>
-          <div className={`w-full bg-white sm:rounded-xl sm:shadow-xl overflow-hidden flex flex-col h-[100dvh] sm:h-[85vh] transition-all duration-300 ${currentView === 'admin' ? 'max-w-4xl' : 'max-w-2xl'}`}>
+          <div className={`w-full bg-white sm:rounded-xl sm:shadow-xl overflow-hidden flex flex-col h-[100dvh] sm:h-[85vh] transition-all duration-300 ${currentView === 'admin' ? 'max-w-6xl' : 'max-w-2xl'}`}>
         
         {/* Header */}
         <div className="bg-[#B11226] px-4 sm:px-6 py-3 sm:py-4 flex items-center justify-between shrink-0">
@@ -350,6 +350,7 @@ export default function App() {
                   msg={msg} 
                   speakingId={speakingId} 
                   toggleSpeech={toggleSpeech} 
+                  onSuggestionClick={(text) => setInputValue(text)}
                 />
               ))}
 

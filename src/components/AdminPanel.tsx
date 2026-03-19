@@ -329,182 +329,187 @@ const AdminPanel = ({ files, setFiles, categories, setCategories }: AdminPanelPr
         </div>
       </div>
 
-      {/* Upload Section */}
-      <div className="bg-white p-5 rounded-xl shadow-sm border border-gray-200 shrink-0">
-        <h3 className="text-md font-semibold text-[#B11226] mb-3 flex items-center">
-          <Upload size={18} className="mr-2" /> อัปโหลดเอกสารเข้าสู่ระบบ (รองรับ PDF, Office, Media)
-        </h3>
-        <div className="flex flex-col sm:flex-row gap-4">
-          <div 
-            onClick={() => fileInputRef.current?.click()} 
-            onDragOver={handleDragOver}
-            onDragLeave={handleDragLeave}
-            onDrop={handleDrop}
-            className={`flex-1 border-2 border-dashed ${(isDragging || selectedFile) ? 'border-[#B11226] bg-[#fdf2f3]' : 'border-gray-300 hover:bg-gray-50'} rounded-lg p-6 flex flex-col items-center justify-center transition-colors cursor-pointer`}
-          >
-            <input 
-              type="file" 
-              ref={fileInputRef} 
-              onChange={handleFileChange} 
-              className="hidden" 
-              accept={acceptedExtensions}
-            />
-            {selectedFile ? getFileIcon(selectedFile.name) : <FileText className="text-gray-400 mb-2" size={28} />}
-            <p className={`text-sm ${selectedFile ? 'text-[#B11226] font-medium text-center mt-2' : 'text-gray-600 mt-2'}`}>
-              {selectedFile ? selectedFile.name : 'คลิกเพื่อเลือกไฟล์ หรือลากไฟล์มาวางที่นี่'}
-            </p>
-            <p className="text-xs text-gray-400 mt-2 text-center max-w-xs">รองรับ Document, Image, Audio, Video<br/>(Gemini Multimodal RAG)</p>
-          </div>
-          
-          <div className="sm:w-1/3 flex flex-col space-y-3">
-            <div>
-              <label className="block text-xs font-medium text-gray-700 mb-1">หมวดหมู่ของเอกสาร (Category)</label>
-              <select 
-                value={uploadCategory} 
-                onChange={(e) => setUploadCategory(e.target.value)}
-                className="w-full bg-gray-50 border border-gray-300 text-gray-900 text-base sm:text-sm rounded-lg focus:ring-[#B11226] focus:border-[#B11226] p-3 sm:p-2.5 outline-none"
+      <div className="flex flex-col lg:flex-row gap-6">
+        {/* Left Column: Upload & Categories */}
+        <div className="lg:w-1/3 flex flex-col space-y-6 shrink-0">
+          {/* Upload Section */}
+          <div className="bg-white p-5 rounded-xl shadow-sm border border-gray-200">
+            <h3 className="text-md font-semibold text-[#B11226] mb-3 flex items-center">
+              <Upload size={18} className="mr-2" /> อัปโหลดเอกสาร
+            </h3>
+            <div className="flex flex-col space-y-4">
+              <div 
+                onClick={() => fileInputRef.current?.click()} 
+                onDragOver={handleDragOver}
+                onDragLeave={handleDragLeave}
+                onDrop={handleDrop}
+                className={`border-2 border-dashed ${(isDragging || selectedFile) ? 'border-[#B11226] bg-[#fdf2f3]' : 'border-gray-300 hover:bg-gray-50'} rounded-lg p-6 flex flex-col items-center justify-center transition-colors cursor-pointer`}
               >
-                {categories.length === 0 && <option value="" disabled>ไม่มีหมวดหมู่</option>}
-                {categories.map(cat => (
-                  <option key={cat.id} value={cat.id}>{cat.name}</option>
-                ))}
-              </select>
+                <input 
+                  type="file" 
+                  ref={fileInputRef} 
+                  onChange={handleFileChange} 
+                  className="hidden" 
+                  accept={acceptedExtensions}
+                />
+                {selectedFile ? getFileIcon(selectedFile.name) : <FileText className="text-gray-400 mb-2" size={28} />}
+                <p className={`text-sm ${selectedFile ? 'text-[#B11226] font-medium text-center mt-2' : 'text-gray-600 mt-2'}`}>
+                  {selectedFile ? selectedFile.name : 'คลิกเพื่อเลือกไฟล์'}
+                </p>
+              </div>
+              
+              <div className="flex flex-col space-y-3">
+                <div>
+                  <label className="block text-xs font-medium text-gray-700 mb-1">หมวดหมู่</label>
+                  <select 
+                    value={uploadCategory} 
+                    onChange={(e) => setUploadCategory(e.target.value)}
+                    className="w-full bg-gray-50 border border-gray-300 text-gray-900 text-sm rounded-lg focus:ring-[#B11226] focus:border-[#B11226] p-2.5 outline-none"
+                  >
+                    {categories.length === 0 && <option value="" disabled>ไม่มีหมวดหมู่</option>}
+                    {categories.map(cat => (
+                      <option key={cat.id} value={cat.id}>{cat.name}</option>
+                    ))}
+                  </select>
+                </div>
+                <button 
+                  onClick={handleUpload}
+                  disabled={isUploading}
+                  className={`w-full text-white text-sm font-medium rounded-lg px-4 py-2.5 flex justify-center items-center transition-colors ${
+                    isUploading ? 'bg-gray-400 cursor-not-allowed' : 'bg-[#B11226] hover:bg-[#8a0e1d] shadow-sm'
+                  }`}
+                >
+                  {isUploading ? (
+                    <><div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin mr-2"></div> กำลังอัปโหลด...</>
+                  ) : showSuccess ? (
+                    <><CheckCircle size={16} className="mr-2" /> สำเร็จ</>
+                  ) : (
+                    'เริ่มอัปโหลด'
+                  )}
+                </button>
+              </div>
             </div>
-            <button 
-              onClick={handleUpload}
-              disabled={isUploading}
-              className={`w-full text-white text-sm font-medium rounded-lg px-4 py-2.5 flex justify-center items-center transition-colors ${
-                isUploading ? 'bg-gray-400 cursor-not-allowed' : 'bg-[#B11226] hover:bg-[#8a0e1d] shadow-sm'
-              }`}
-            >
-              {isUploading ? (
-                <><div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin mr-2"></div> กำลังประมวลผล...</>
-              ) : showSuccess ? (
-                <><CheckCircle size={16} className="mr-2" /> อัปโหลดสำเร็จ</>
+          </div>
+
+          {/* Category Management Section */}
+          <div className="bg-white p-5 rounded-xl shadow-sm border border-gray-200">
+            <h3 className="text-md font-semibold text-[#B11226] mb-3 flex items-center">
+              <Tag size={18} className="mr-2" /> จัดการหมวดหมู่
+            </h3>
+            <div className="flex flex-col space-y-4">
+              <div className="flex flex-col space-y-2">
+                <label className="block text-xs font-medium text-gray-700">เพิ่มหมวดหมู่ใหม่</label>
+                <div className="flex space-x-2">
+                  <input
+                    type="text"
+                    value={newCategoryName}
+                    onChange={(e) => setNewCategoryName(e.target.value)}
+                    placeholder="ชื่อหมวดหมู่..."
+                    className="flex-1 bg-gray-50 border border-gray-300 text-gray-900 text-sm rounded-lg focus:ring-[#B11226] focus:border-[#B11226] p-2 outline-none"
+                  />
+                  <button
+                    onClick={handleAddCategory}
+                    disabled={!newCategoryName.trim()}
+                    className="bg-[#333333] hover:bg-black text-white p-2 rounded-lg transition-colors disabled:bg-gray-300 disabled:cursor-not-allowed"
+                  >
+                    <Plus size={18} />
+                  </button>
+                </div>
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-gray-700 mb-2">หมวดหมู่ปัจจุบัน</label>
+                <div className="flex flex-wrap gap-2">
+                  {categories.map(cat => {
+                    const isUsed = files.some(f => f.category === cat.id);
+                    return (
+                      <div key={cat.id} className="bg-gray-100 border border-gray-200 rounded-full px-3 py-1 flex items-center text-xs text-gray-700">
+                        <span>{cat.name}</span>
+                        <button 
+                          onClick={() => handleDeleteCategory(cat.id)}
+                          className={`ml-2 transition-colors ${isUsed ? 'text-gray-300 cursor-not-allowed' : 'text-gray-400 hover:text-red-500'}`}
+                        >
+                          <X size={12} />
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* Right Column: File List */}
+        <div className="flex-1 flex flex-col min-w-0">
+          <div className="bg-white rounded-xl shadow-sm border border-gray-200 flex flex-col h-full">
+            <div className="p-5 border-b border-gray-100 flex items-center justify-between shrink-0">
+              <h3 className="font-semibold text-gray-800">รายการเอกสารในระบบ (File Management)</h3>
+              <span className="text-xs text-gray-400">แสดง {visibleFiles.length} จาก {files.length} รายการ</span>
+            </div>
+            
+            <div className="p-4 overflow-y-auto">
+              {files.length === 0 ? (
+                <div className="flex flex-col items-center justify-center py-12 text-gray-400">
+                  <FileArchive size={48} className="mb-3 opacity-20" />
+                  <p>ยังไม่มีเอกสารในระบบ</p>
+                </div>
               ) : (
-                'เริ่มอัปโหลด (Upload & Index)'
-              )}
-            </button>
-          </div>
-        </div>
-      </div>
-
-      {/* Category Management Section */}
-      <div className="bg-white p-5 rounded-xl shadow-sm border border-gray-200 shrink-0">
-        <h3 className="text-md font-semibold text-[#B11226] mb-3 flex items-center">
-          <Tag size={18} className="mr-2" /> จัดการหมวดหมู่เอกสาร (Categories)
-        </h3>
-        <div className="flex flex-col sm:flex-row gap-6">
-          <div className="sm:w-1/3 flex flex-col space-y-2">
-            <label className="block text-xs font-medium text-gray-700">เพิ่มหมวดหมู่ใหม่</label>
-            <div className="flex space-x-2">
-              <input
-                type="text"
-                value={newCategoryName}
-                onChange={(e) => setNewCategoryName(e.target.value)}
-                placeholder="ชื่อหมวดหมู่..."
-                className="flex-1 bg-gray-50 border border-gray-300 text-gray-900 text-base sm:text-sm rounded-lg focus:ring-[#B11226] focus:border-[#B11226] p-2.5 sm:p-2 outline-none"
-              />
-              <button
-                onClick={handleAddCategory}
-                disabled={!newCategoryName.trim()}
-                className="bg-[#333333] hover:bg-black text-white p-2 rounded-lg transition-colors disabled:bg-gray-300 disabled:cursor-not-allowed"
-              >
-                <Plus size={18} />
-              </button>
-            </div>
-          </div>
-          <div className="flex-1">
-            <label className="block text-xs font-medium text-gray-700 mb-2">หมวดหมู่ปัจจุบัน</label>
-            <div className="flex flex-wrap gap-2">
-              {categories.map(cat => {
-                const isUsed = files.some(f => f.category === cat.id);
-                return (
-                  <div key={cat.id} className="bg-gray-100 border border-gray-200 rounded-full px-3 py-1 flex items-center text-sm text-gray-700">
-                    <span>{cat.name}</span>
-                    <button 
-                      onClick={() => handleDeleteCategory(cat.id)}
-                      className={`ml-2 transition-colors ${isUsed ? 'text-gray-300 cursor-not-allowed' : 'text-gray-400 hover:text-red-500'}`}
-                      title={isUsed ? "ไม่สามารถลบได้ มีเอกสารใช้งานอยู่" : "ลบหมวดหมู่"}
-                    >
-                      <X size={14} />
-                    </button>
-                  </div>
-                );
-              })}
-            </div>
-          </div>
-        </div>
-      </div>
-
-      {/* File List Section */}
-      <div className="bg-white rounded-xl shadow-sm border border-gray-200 flex-1 flex flex-col min-h-0 overflow-hidden">
-        <div className="p-5 border-b border-gray-100 flex items-center justify-between shrink-0">
-          <h3 className="font-semibold text-gray-800">รายการเอกสารในระบบ (File Management)</h3>
-          <span className="text-xs text-gray-400">แสดง {visibleFiles.length} จาก {files.length} รายการ</span>
-        </div>
-        
-        <div className="overflow-y-auto flex-1 p-2 sm:p-4">
-          {files.length === 0 ? (
-            <div className="flex flex-col items-center justify-center py-12 text-gray-400">
-              <FileArchive size={48} className="mb-3 opacity-20" />
-              <p>ยังไม่มีเอกสารในระบบ</p>
-            </div>
-          ) : (
-            <div className="space-y-3">
-              {visibleFiles.map(file => (
-                <div key={file.id} className={`p-4 rounded-xl border transition-all ${file.status === 'active' ? 'bg-white border-gray-100 shadow-sm' : 'bg-gray-50 border-gray-200 opacity-70'}`}>
-                  <div className="flex items-start justify-between">
-                    <div className="flex items-start space-x-3">
-                      <div className="mt-1">{getFileIcon(file.name)}</div>
-                      <div>
-                        <h4 className="font-medium text-gray-900 text-sm sm:text-base break-all">{file.name}</h4>
-                        <div className="flex flex-wrap gap-x-3 gap-y-1 mt-1">
-                          <span className="text-xs text-gray-500 flex items-center"><Tag size={12} className="mr-1" /> {getCategoryName(file.category)}</span>
-                          <span className="text-xs text-gray-500 flex items-center"><Activity size={12} className="mr-1" /> {file.size}</span>
-                          <span className="text-xs text-gray-500">{file.date}</span>
+                <div className="space-y-3">
+                  {visibleFiles.map(file => (
+                    <div key={file.id} className={`p-4 rounded-xl border transition-all ${file.status === 'active' ? 'bg-white border-gray-100 shadow-sm' : 'bg-gray-50 border-gray-200 opacity-70'}`}>
+                      <div className="flex items-start justify-between">
+                        <div className="flex items-start space-x-3">
+                          <div className="mt-1">{getFileIcon(file.name)}</div>
+                          <div>
+                            <h4 className="font-medium text-gray-900 text-sm sm:text-base break-all">{file.name}</h4>
+                            <div className="flex flex-wrap gap-x-3 gap-y-1 mt-1">
+                              <span className="text-xs text-gray-500 flex items-center"><Tag size={12} className="mr-1" /> {getCategoryName(file.category)}</span>
+                              <span className="text-xs text-gray-500 flex items-center"><Activity size={12} className="mr-1" /> {file.size}</span>
+                              <span className="text-xs text-gray-500">{file.date}</span>
+                            </div>
+                          </div>
+                        </div>
+                        <div className="flex items-center space-x-1 sm:space-x-2">
+                          <button 
+                            onClick={() => toggleStatus(file.id)}
+                            className={`p-2 rounded-lg transition-colors ${file.status === 'active' ? 'text-green-600 hover:bg-green-50' : 'text-gray-400 hover:bg-gray-100'}`}
+                            title={file.status === 'active' ? 'ปิดการใช้งาน' : 'เปิดการใช้งาน'}
+                          >
+                            {file.status === 'active' ? <ToggleRight size={20} /> : <ToggleLeft size={20} />}
+                          </button>
+                          <button 
+                            onClick={() => deleteFile(file.id)}
+                            className="p-2 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors"
+                            title="ลบเอกสาร"
+                          >
+                            <Trash2 size={18} />
+                          </button>
                         </div>
                       </div>
                     </div>
-                    <div className="flex items-center space-x-1 sm:space-x-2">
-                      <button 
-                        onClick={() => toggleStatus(file.id)}
-                        className={`p-2 rounded-lg transition-colors ${file.status === 'active' ? 'text-green-600 hover:bg-green-50' : 'text-gray-400 hover:bg-gray-100'}`}
-                        title={file.status === 'active' ? 'ปิดการใช้งาน' : 'เปิดการใช้งาน'}
-                      >
-                        {file.status === 'active' ? <ToggleRight size={20} /> : <ToggleLeft size={20} />}
-                      </button>
-                      <button 
-                        onClick={() => deleteFile(file.id)}
-                        className="p-2 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors"
-                        title="ลบเอกสาร"
-                      >
-                        <Trash2 size={18} />
-                      </button>
-                    </div>
-                  </div>
+                  ))}
+                  
+                  {files.length > visibleCount && (
+                    <button 
+                      onClick={() => setVisibleCount(prev => prev + 5)}
+                      className="w-full py-3 text-sm text-gray-500 hover:text-[#B11226] flex items-center justify-center transition-colors"
+                    >
+                      โหลดเพิ่มอีก 5 รายการ <ChevronDown size={16} className="ml-1" />
+                    </button>
+                  )}
+                  
+                  {visibleCount > 5 && (
+                    <button 
+                      onClick={() => setVisibleCount(5)}
+                      className="w-full py-1 text-xs text-gray-400 hover:text-gray-600 flex items-center justify-center transition-colors"
+                    >
+                      ย่อรายการ <ChevronUp size={14} className="ml-1" />
+                    </button>
+                  )}
                 </div>
-              ))}
-              
-              {files.length > visibleCount && (
-                <button 
-                  onClick={() => setVisibleCount(prev => prev + 5)}
-                  className="w-full py-3 text-sm text-gray-500 hover:text-[#B11226] flex items-center justify-center transition-colors"
-                >
-                  โหลดเพิ่มอีก 5 รายการ <ChevronDown size={16} className="ml-1" />
-                </button>
-              )}
-              
-              {visibleCount > 5 && (
-                <button 
-                  onClick={() => setVisibleCount(5)}
-                  className="w-full py-1 text-xs text-gray-400 hover:text-gray-600 flex items-center justify-center transition-colors"
-                >
-                  ย่อรายการ <ChevronUp size={14} className="ml-1" />
-                </button>
               )}
             </div>
-          )}
+          </div>
         </div>
       </div>
 

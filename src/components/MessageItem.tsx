@@ -1,5 +1,5 @@
 import React, { memo } from 'react';
-import { User, Bot, FileText, Search, ShieldAlert, AlertTriangle, Info, Volume2, VolumeX } from 'lucide-react';
+import { User, Bot, FileText, Search, ShieldAlert, AlertTriangle, Info, Volume2, VolumeX, HelpCircle } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 
@@ -19,9 +19,10 @@ interface MessageItemProps {
   msg: Message;
   speakingId: number | null;
   toggleSpeech: (text: string, id: number) => void;
+  onSuggestionClick?: (text: string) => void;
 }
 
-const MessageItem = memo(({ msg, speakingId, toggleSpeech }: MessageItemProps) => {
+const MessageItem = memo(({ msg, speakingId, toggleSpeech, onSuggestionClick }: MessageItemProps) => {
   const renderBotMessageContent = () => {
     switch (msg.type) {
       case 'welcome':
@@ -71,22 +72,32 @@ const MessageItem = memo(({ msg, speakingId, toggleSpeech }: MessageItemProps) =
 
       case 'clarification_needed':
         return (
-          <div className="space-y-3">
-            <div className="flex items-start space-x-2">
-              <Search className="text-orange-500 mt-0.5 flex-shrink-0" size={18} />
-              <p className="text-[#333333]">{msg.text}</p>
+          <div className="space-y-4">
+            <div className="flex items-start space-x-3 bg-orange-50/50 p-3 rounded-xl border border-orange-100">
+              <div className="bg-orange-100 p-1.5 rounded-full shrink-0">
+                <HelpCircle className="text-orange-600" size={18} />
+              </div>
+              <div className="space-y-1">
+                <p className="font-semibold text-orange-900 text-sm">ต้องการข้อมูลเพิ่มเติม</p>
+                <p className="text-gray-700 text-sm leading-relaxed">{msg.text}</p>
+              </div>
             </div>
+            
             {msg.missing_fields && msg.missing_fields.length > 0 && (
-              <div className="bg-orange-50 p-3 rounded-md border border-orange-100 text-sm">
-                <p className="font-semibold text-orange-800 mb-2">ข้อมูลที่ต้องการเพิ่มเติม:</p>
-                <ul className="list-none space-y-1.5">
+              <div className="pl-11">
+                <p className="text-xs font-medium text-gray-500 mb-2 uppercase tracking-wider">กรุณาระบุข้อมูลดังนี้:</p>
+                <div className="flex flex-wrap gap-2">
                   {msg.missing_fields.map((field, idx) => (
-                    <li key={idx} className="flex items-start text-orange-700">
-                      <span className="inline-block w-4 text-center mr-1">•</span>
-                      <span>{field}</span>
-                    </li>
+                    <button 
+                      key={idx} 
+                      onClick={() => onSuggestionClick?.(field)}
+                      className="bg-white border border-orange-200 text-orange-700 px-3 py-1.5 rounded-lg text-sm shadow-sm flex items-center hover:bg-orange-50 transition-colors cursor-pointer"
+                    >
+                      <span className="w-1.5 h-1.5 bg-orange-400 rounded-full mr-2"></span>
+                      {field}
+                    </button>
                   ))}
-                </ul>
+                </div>
               </div>
             )}
           </div>
