@@ -302,7 +302,7 @@ app.post("/api/chat", async (req, res) => {
 กฎเกณฑ์:
 1. การตอบคำถาม: ให้ตอบอย่าง "สั้น กระชับ และเข้าใจง่าย" (Concise and Clear) หลีกเลี่ยงการใช้คำฟุ่มเฟือย
 2. หากคำถามเป็นเรื่องการวินิจฉัยโรค สั่งยา หรืออาการเจ็บป่วย ให้กำหนด status เป็น "out_of_scope" และแนะนำให้พบแพทย์
-3. หากคำถามกำกวม ให้กำหนด status เป็น "clarification_needed"
+3. หากคำถามกำกวม หรือกว้างเกินไป (Broad/Ambiguous) เช่น "มีอะไรบ้าง", "ราคาเท่าไหร่" (โดยไม่ระบุบริการ), "ขอข้อมูลหน่อย" ให้กำหนด status เป็น "clarification_needed" และตอบกลับโดยขอให้ผู้ใช้ระบุสิ่งที่ต้องการทราบให้ชัดเจนยิ่งขึ้น เช่น "ต้องการทราบราคาของบริการใดเป็นพิเศษครับ?" หรือ "ต้องการข้อมูลในส่วนไหนครับ?"
 4. หากข้อมูลในเอกสารขัดแย้งกันเอง ให้กำหนด status เป็น "conflict_detected"
 5. หากค้นหาในเอกสารที่แนบไปทั้งหมดแล้ว "ไม่พบข้อมูลเลย" ให้กำหนด status เป็น "no_answer"
 6. หากตอบได้ ให้กำหนด status เป็น "answered" พร้อมใส่ชื่อไฟล์ที่ใช้อ้างอิงลงใน array citations`,
@@ -313,7 +313,7 @@ app.post("/api/chat", async (req, res) => {
           properties: {
             status: { type: Type.STRING, enum: ["answered", "no_answer", "clarification_needed", "out_of_scope", "conflict_detected"] },
             short_answer: { type: Type.STRING, description: "คำตอบแบบสั้นๆ หรือสรุป" },
-            answer: { type: Type.STRING, description: "คำตอบแบบละเอียด" },
+            answer: { type: Type.STRING, description: "คำตอบแบบละเอียด หรือคำถามเพื่อขอความชัดเจน" },
             confidence: { type: Type.NUMBER, description: "ความมั่นใจ 0-1" },
             citations: {
               type: Type.ARRAY,
