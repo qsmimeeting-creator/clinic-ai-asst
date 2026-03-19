@@ -7,10 +7,48 @@ import { fileURLToPath } from "url";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 // Initialize KV with fallback for different environment variable names
-const kv = createClient({
+const hasKVConfig = (process.env.KV_REST_API_URL && process.env.KV_REST_API_TOKEN) || 
+                   (process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_REST_TOKEN) ||
+                   (process.env.KV_URL);
+
+const hasBlobConfig = !!process.env.BLOB_READ_WRITE_TOKEN;
+
+// In-memory fallback for development without KV
+const memoryStore: Record<string, any> = {
+  "clinic_files_ids": [],
+  "clinic_categories": [
+    { id: "cat_1", name: "ข้อมูลทั่วไป" },
+    { id: "cat_2", name: "ระเบียบการคลินิก" }
+  ],
+  "clinic_gemini_keys": []
+};
+
+const kv = hasKVConfig ? createClient({
   url: process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL || "",
   token: process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN || "",
-});
+}) : {
+  get: async (key: string) => memoryStore[key] || null,
+  set: async (key: string, value: any) => { memoryStore[key] = value; return "OK"; },
+  del: async (key: string) => { delete memoryStore[key]; return 1; },
+};
+
+// Mock Blob put/del
+const mockPut = async (name: string, buffer: Buffer, options: any) => {
+  console.log(`Mock Upload: ${name}`);
+  const base64 = buffer.toString('base64');
+  return {
+    url: `data:${options.contentType};base64,${base64}`,
+    downloadUrl: `data:${options.contentType};base64,${base64}`,
+    pathname: name,
+    contentType: options.contentType,
+    contentDisposition: ''
+  };
+};
+
+const mockDel = async (url: string) => {
+  console.log(`Mock Delete: ${url}`);
+  return;
+};
 
 const app = express();
 const PORT = 3000;
@@ -21,14 +59,8 @@ app.use(express.json({ limit: '50mb' }));
 
 // Helper to check environment variables
 const checkEnv = () => {
-  const missing = [];
-  const hasKV = (process.env.KV_REST_API_URL && process.env.KV_REST_API_TOKEN) || 
-                (process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_REST_TOKEN) ||
-                (process.env.KV_URL);
-  
-  if (!hasKV) missing.push("KV_REST_API_URL/TOKEN");
-  if (!process.env.BLOB_READ_WRITE_TOKEN) missing.push("BLOB_READ_WRITE_TOKEN");
-  return missing;
+  // We no longer block if KV or Blob is missing because we have fallbacks
+  return [];
 };
 
 // Fetch all data (files and categories)
@@ -52,7 +84,8 @@ app.get("/api/data", async (req, res) => {
     }
 
     const categories = await kv.get("clinic_categories") || [];
-    res.json({ files, categories });
+    const geminiKeys = await kv.get("clinic_gemini_keys") || [];
+    res.json({ files, categories, geminiKeys });
   } catch (error: any) {
     console.error("KV Error:", error);
     res.status(500).json({ error: "KV Connection Error", message: error.message });
@@ -70,6 +103,20 @@ app.post("/api/categories", async (req, res) => {
     res.json({ success: true });
   } catch (error: any) {
     res.status(500).json({ error: "Failed to save categories", message: error.message });
+  }
+});
+
+// Save Gemini API Keys
+app.post("/api/keys", async (req, res) => {
+  const missing = checkEnv();
+  if (missing.length > 0) return res.status(500).json({ error: `Missing: ${missing.join(", ")}` });
+  
+  try {
+    const { keys } = req.body;
+    await kv.set("clinic_gemini_keys", keys);
+    res.json({ success: true });
+  } catch (error: any) {
+    res.status(500).json({ error: "Failed to save API keys", message: error.message });
   }
 });
 
@@ -93,14 +140,14 @@ app.post("/api/upload", async (req, res) => {
     // 1. Upload to Vercel Blob
     const buffer = Buffer.from(inlineData, 'base64');
     
-    // Explicitly provide contentLength to avoid "Missing [x]-content-length header" error
-    const blob = await put(name, buffer, {
+    // Use real put if config exists, otherwise use mock
+    const blob = hasBlobConfig ? await put(name, buffer, {
       contentType: mimeType,
       access: 'public',
       // @ts-ignore - Some versions of the SDK might not have this in types but the API supports it
       contentLength: buffer.length,
       addRandomSuffix: true
-    });
+    }) : await mockPut(name, buffer, { contentType: mimeType });
 
     // 2. Save metadata to individual KV key and update ID list
     const fileId = `file_${Date.now()}`;
@@ -139,7 +186,11 @@ app.delete("/api/files/:id", async (req, res) => {
     const fileToDelete: any = await kv.get(`clinic_file:${id}`);
     
     if (fileToDelete?.url) {
-      await del(fileToDelete.url);
+      if (hasBlobConfig && !fileToDelete.url.startsWith('data:')) {
+        await del(fileToDelete.url);
+      } else {
+        await mockDel(fileToDelete.url);
+      }
     }
     
     await kv.del(`clinic_file:${id}`);

@@ -1,33 +1,72 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { Send, Bot, User, FileText, AlertTriangle, ShieldAlert, Info, ThumbsUp, ThumbsDown, Clock, Search, Settings, ArrowLeft, Upload, Trash2, Database, Activity, FileArchive, CheckCircle, Lock, X, Plus, Tag, Mic, Volume2, VolumeX, Image as ImageIcon, FileAudio, FileVideo } from 'lucide-react';
 import { GoogleGenAI, Type } from "@google/genai";
+import mammoth from 'mammoth';
+import * as XLSX from 'xlsx';
 
 // --- REAL AI BACKEND (Using Gemini API with Context Stuffing & Multimodal) ---
-const callGeminiAPI = async (query, activeFiles) => {
-  const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+const callGeminiAPI = async (query, activeFiles, availableKeys = []) => {
+  // เลือกใช้ Key จากรายการที่มี (ถ้ามี) หรือใช้จาก process.env เป็นค่าเริ่มต้น
+  let apiKey = process.env.GEMINI_API_KEY;
+  
+  if (availableKeys.length > 0) {
+    // สุ่มเลือก Key จากรายการที่มีเพื่อกระจายโหลด (Load Balancing)
+    const randomIndex = Math.floor(Math.random() * availableKeys.length);
+    apiKey = availableKeys[randomIndex];
+  }
+
+  if (!apiKey) {
+    throw new Error("Missing Gemini API Key. Please configure at least one key.");
+  }
+
+  const ai = new GoogleGenAI({ apiKey });
   
   // 1. เตรียม Context จากไฟล์ทั้งหมดที่ Active อยู่ (แยกระหว่าง Text และ Media)
   let textContext = "ข้อมูลเอกสารของคลินิกที่เป็นข้อความ:\n";
   let mediaParts = [];
   let hasText = false;
 
-  activeFiles.forEach(file => {
-    if (file.inlineData && file.mimeType) {
+  // ฟังก์ชันช่วยดึงข้อมูลไฟล์ถ้าไม่มี inlineData (กรณีไฟล์ > 1MB)
+  const getFileData = async (file) => {
+    if (file.inlineData) return file.inlineData;
+    if (!file.url) return null;
+    
+    try {
+      const resp = await fetch(file.url);
+      const blob = await resp.blob();
+      return new Promise((resolve) => {
+        const reader = new FileReader();
+        reader.onloadend = () => {
+          const base64 = (reader.result as string).split(',')[1];
+          resolve(base64);
+        };
+        reader.readAsDataURL(blob);
+      });
+    } catch (e) {
+      console.error("Error fetching file data:", e);
+      return null;
+    }
+  };
+
+  for (const file of activeFiles) {
+    const data = await getFileData(file);
+    
+    if (data && file.mimeType && (file.mimeType.startsWith('image/') || file.mimeType.startsWith('audio/') || file.mimeType.startsWith('video/') || file.mimeType === 'application/pdf')) {
       // สำหรับไฟล์ PDF, รูปภาพ, เสียง, วีดีโอ
       mediaParts.push({
         inlineData: {
           mimeType: file.mimeType,
-          data: file.inlineData
+          data: data
         }
       });
       textContext += `\n[แนบไฟล์ Media/PDF: ${file.name}]`;
       hasText = true;
     } else if (file.content) {
-      // สำหรับ Text, CSV, และ Mock Office Files
+      // สำหรับ Text, CSV, และ Office Files ที่ถูกแปลงเป็น Text แล้ว
       textContext += `--- เริ่มเอกสาร: ${file.name} ---\n${file.content}\n--- จบเอกสาร: ${file.name} ---\n\n`;
       hasText = true;
     }
-  });
+  }
 
   if (!hasText && mediaParts.length === 0) {
     textContext = "ไม่มีข้อมูลเอกสารในระบบขณะนี้";
@@ -97,11 +136,13 @@ const callGeminiAPI = async (query, activeFiles) => {
 };
 
 // --- ADMIN COMPONENT ---
-const AdminPanel = ({ files, setFiles, categories, setCategories }) => {
+const AdminPanel = ({ files, setFiles, categories, setCategories, geminiKeys, setGeminiKeys }) => {
   const [isUploading, setIsUploading] = useState(false);
   const [uploadCategory, setUploadCategory] = useState(categories[0]?.id || '');
   const [showSuccess, setShowSuccess] = useState(false);
   const [newCategoryName, setNewCategoryName] = useState('');
+  const [newApiKey, setNewApiKey] = useState('');
+  const [isSavingKeys, setIsSavingKeys] = useState(false);
   
   const [modal, setModal] = useState({ isOpen: false, title: '', message: '', type: 'alert', onConfirm: null });
   
@@ -142,40 +183,68 @@ const AdminPanel = ({ files, setFiles, categories, setCategories }) => {
     const ext = file.name.split('.').pop().toLowerCase();
     
     const textExts = ['txt', 'csv'];
-    const officeExts = ['doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx'];
+    const wordExts = ['doc', 'docx'];
+    const excelExts = ['xls', 'xlsx'];
+    const pptExts = ['ppt', 'pptx'];
+    
+    // Read file as ArrayBuffer for mammoth and xlsx
+    const arrayBuffer = await file.arrayBuffer();
     
     // Always read file as base64 for uploading to Vercel Blob
-    const base64Data = await new Promise<string>((resolve, reject) => {
+    const base64Data = await new Promise<string>((resolve) => {
       const reader = new FileReader();
       reader.onload = (e) => {
         const result = e.target?.result;
         if (typeof result === 'string') {
           resolve(result.split(',')[1]);
-        } else {
-          reject(new Error('Failed to read file as base64'));
         }
       };
-      reader.onerror = (err) => reject(err);
       reader.readAsDataURL(file);
     });
 
     if (textExts.includes(ext)) {
-      const content = await new Promise((resolve) => {
-        const reader = new FileReader();
-        reader.onload = (e) => resolve(e.target.result);
-        reader.readAsText(file);
-      });
-      
+      const content = await file.text();
       return { type: 'text', content, inlineData: base64Data, mimeType: 'text/plain' };
     } 
-    else if (officeExts.includes(ext)) {
+    else if (wordExts.includes(ext)) {
+      try {
+        const result = await mammoth.extractRawText({ arrayBuffer });
+        return { 
+          type: 'text', 
+          content: result.value,
+          inlineData: base64Data,
+          mimeType: file.type || 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+        };
+      } catch (e) {
+        return { type: 'text', content: `[Error reading Word file: ${file.name}]`, inlineData: base64Data, mimeType: file.type };
+      }
+    }
+    else if (excelExts.includes(ext)) {
+      try {
+        const workbook = XLSX.read(arrayBuffer, { type: 'array' });
+        let content = "";
+        workbook.SheetNames.forEach(sheetName => {
+          const worksheet = workbook.Sheets[sheetName];
+          content += `--- Sheet: ${sheetName} ---\n${XLSX.utils.sheet_to_csv(worksheet)}\n`;
+        });
+        return { 
+          type: 'text', 
+          content,
+          inlineData: base64Data,
+          mimeType: file.type || 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        };
+      } catch (e) {
+        return { type: 'text', content: `[Error reading Excel file: ${file.name}]`, inlineData: base64Data, mimeType: file.type };
+      }
+    }
+    else if (pptExts.includes(ext)) {
       return { 
         type: 'text', 
-        content: `[ไฟล์เอกสาร Office: ${file.name}]\nหมายเหตุ: ระบบกำลังประมวลผลข้อมูลจากไฟล์นี้ (ในเวอร์ชันปัจจุบันรองรับการอ่านข้อความจากไฟล์ Text, CSV และไฟล์ Media/PDF เป็นหลัก)`,
+        content: `[ไฟล์ PowerPoint: ${file.name}]\nหมายเหตุ: ระบบกำลังประมวลผลข้อมูลจากไฟล์นี้ (แนะนำให้แปลงเป็น PDF เพื่อการอ่านที่แม่นยำที่สุด)`,
         inlineData: base64Data,
-        mimeType: file.type || 'application/octet-stream'
+        mimeType: file.type || 'application/vnd.openxmlformats-officedocument.presentationml.presentation'
       };
-    } 
+    }
     else {
       let mimeType = file.type;
       
@@ -344,6 +413,61 @@ const AdminPanel = ({ files, setFiles, categories, setCategories }) => {
     });
   };
 
+  const handleAddApiKey = async () => {
+    if (!newApiKey.trim()) return;
+    if (geminiKeys.includes(newApiKey.trim())) {
+      setModal({ isOpen: true, title: 'แจ้งเตือน', message: 'API Key นี้มีอยู่ในระบบแล้วครับ', type: 'alert' });
+      return;
+    }
+    
+    const updatedKeys = [...geminiKeys, newApiKey.trim()];
+    setIsSavingKeys(true);
+    
+    try {
+      const response = await fetch('/api/keys', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ keys: updatedKeys })
+      });
+      if (!response.ok) throw new Error('Failed to save API keys');
+      
+      setGeminiKeys(updatedKeys);
+      setNewApiKey('');
+    } catch (error) {
+      setModal({ isOpen: true, title: 'เกิดข้อผิดพลาด', message: 'ไม่สามารถบันทึก API Key ได้', type: 'alert' });
+    } finally {
+      setIsSavingKeys(false);
+    }
+  };
+
+  const handleDeleteApiKey = async (keyToDelete) => {
+    setModal({
+      isOpen: true,
+      title: 'ยืนยันการลบ API Key',
+      message: 'คุณแน่ใจหรือไม่ที่จะลบ API Key นี้ออกจากระบบ?',
+      type: 'confirm',
+      onConfirm: async () => {
+        const updatedKeys = geminiKeys.filter(k => k !== keyToDelete);
+        setIsSavingKeys(true);
+        try {
+          const response = await fetch('/api/keys', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ keys: updatedKeys })
+          });
+          if (!response.ok) throw new Error('Failed to save API keys');
+          
+          setGeminiKeys(updatedKeys);
+          closeModal();
+        } catch (error) {
+          setModal({ isOpen: true, title: 'เกิดข้อผิดพลาด', message: 'ไม่สามารถลบ API Key ได้', type: 'alert' });
+        } finally {
+          setIsSavingKeys(false);
+        }
+      }
+    });
+  };
+
   const getCategoryName = (id) => {
     const cat = categories.find(c => c.id === id);
     return cat ? cat.name : id;
@@ -496,6 +620,59 @@ const AdminPanel = ({ files, setFiles, categories, setCategories }) => {
         </div>
       </div>
 
+      {/* Gemini API Key Management Section */}
+      <div className="bg-white p-5 rounded-xl shadow-sm border border-gray-200 shrink-0">
+        <h3 className="text-md font-semibold text-[#B11226] mb-3 flex items-center">
+          <Lock size={18} className="mr-2" /> จัดการ Gemini API Keys (Multiple Keys)
+        </h3>
+        <div className="flex flex-col sm:flex-row gap-6">
+          <div className="sm:w-1/2 flex flex-col space-y-2">
+            <label className="block text-xs font-medium text-gray-700">เพิ่ม Gemini API Key ใหม่</label>
+            <div className="flex space-x-2">
+              <input
+                type="password"
+                value={newApiKey}
+                onChange={(e) => setNewApiKey(e.target.value)}
+                placeholder="วาง API Key ที่นี่..."
+                className="flex-1 bg-gray-50 border border-gray-300 text-gray-900 text-base sm:text-sm rounded-lg focus:ring-[#B11226] focus:border-[#B11226] p-2.5 sm:p-2 outline-none"
+              />
+              <button
+                onClick={handleAddApiKey}
+                disabled={!newApiKey.trim() || isSavingKeys}
+                className="bg-[#B11226] hover:bg-[#8a0e1d] text-white px-4 py-2 rounded-lg transition-colors disabled:bg-gray-300 disabled:cursor-not-allowed flex items-center"
+              >
+                {isSavingKeys ? <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></div> : <Plus size={18} />}
+              </button>
+            </div>
+            <p className="text-[10px] text-gray-400 mt-1">
+              * ระบบจะสุ่มเลือกใช้ Key จากรายการด้านล่างเพื่อกระจายโหลด (Load Balancing)
+            </p>
+          </div>
+          <div className="flex-1">
+            <label className="block text-xs font-medium text-gray-700 mb-2">รายการ API Keys ในระบบ ({geminiKeys.length})</label>
+            <div className="space-y-2 max-h-40 overflow-y-auto pr-2">
+              {geminiKeys.map((key, index) => (
+                <div key={index} className="bg-gray-50 border border-gray-200 rounded-lg px-3 py-2 flex items-center justify-between text-xs font-mono text-gray-600">
+                  <span className="truncate max-w-[200px]">{key.substring(0, 8)}...{key.substring(key.length - 4)}</span>
+                  <button 
+                    onClick={() => handleDeleteApiKey(key)}
+                    className="text-gray-400 hover:text-red-500 transition-colors"
+                    title="ลบ API Key"
+                  >
+                    <Trash2 size={14} />
+                  </button>
+                </div>
+              ))}
+              {geminiKeys.length === 0 && (
+                <div className="text-sm text-gray-400 italic p-2 border border-dashed border-gray-200 rounded-lg">
+                  ยังไม่มีการเพิ่ม Key เพิ่มเติม (ระบบจะใช้ Default Key จาก Environment)
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      </div>
+
       {/* Files Table */}
       <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden shrink-0">
         <div className="px-5 py-4 border-b border-gray-200 flex justify-between items-center">
@@ -623,6 +800,7 @@ export default function App() {
   const [currentView, setCurrentView] = useState('chat'); // 'chat' | 'admin'
   const [categories, setCategories] = useState([]);
   const [files, setFiles] = useState([]);
+  const [geminiKeys, setGeminiKeys] = useState([]);
   const [isLoading, setIsLoading] = useState(true);
 
   useEffect(() => {
@@ -634,6 +812,7 @@ export default function App() {
         if (response.ok) {
           setFiles(data.files || []);
           setCategories(data.categories || []);
+          setGeminiKeys(data.geminiKeys || []);
         } else {
           console.error("Server error fetching data:", data.message || data.error);
         }
@@ -755,7 +934,7 @@ export default function App() {
 
     try {
       const activeFiles = files.filter(f => f.status === 'active');
-      const response = await callGeminiAPI(text, activeFiles);
+      const response = await callGeminiAPI(text, activeFiles, geminiKeys);
       
       const botMsg = {
         id: Date.now() + 1,
@@ -952,7 +1131,14 @@ export default function App() {
 
         {/* Dynamic Body Area */}
         {currentView === 'admin' ? (
-          <AdminPanel files={files} setFiles={setFiles} categories={categories} setCategories={setCategories} />
+          <AdminPanel 
+            files={files} 
+            setFiles={setFiles} 
+            categories={categories} 
+            setCategories={setCategories}
+            geminiKeys={geminiKeys}
+            setGeminiKeys={setGeminiKeys}
+          />
         ) : (
           <>
             {/* Chat Area */}
