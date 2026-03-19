@@ -215,6 +215,19 @@ const AdminPanel = ({ files, setFiles, categories, setCategories }) => {
       return;
     }
 
+    // Check file size (Vercel Serverless Function limit is 4.5MB for Hobby plan)
+    // Base64 encoding increases size by ~33%, so we limit to ~3MB to be safe
+    const MAX_FILE_SIZE = 3 * 1024 * 1024; // 3MB
+    if (selectedFile.size > MAX_FILE_SIZE) {
+      setModal({ 
+        isOpen: true, 
+        title: 'ไฟล์ใหญ่เกินไป', 
+        message: 'ขนาดไฟล์ต้องไม่เกิน 3MB เนื่องจากข้อจำกัดของระบบอัปโหลดผ่านมือถือ กรุณาเลือกไฟล์ที่เล็กลง', 
+        type: 'alert' 
+      });
+      return;
+    }
+
     setIsUploading(true);
     
     try {

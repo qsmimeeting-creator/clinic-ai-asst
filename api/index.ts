@@ -86,11 +86,20 @@ app.post("/api/upload", async (req, res) => {
   try {
     const { name, category, mimeType, inlineData, size, date } = req.body;
     
+    if (!inlineData) {
+      return res.status(400).json({ error: "No file data provided" });
+    }
+
     // 1. Upload to Vercel Blob
     const buffer = Buffer.from(inlineData, 'base64');
+    
+    // Explicitly provide contentLength to avoid "Missing [x]-content-length header" error
     const blob = await put(name, buffer, {
       contentType: mimeType,
       access: 'public',
+      // @ts-ignore - Some versions of the SDK might not have this in types but the API supports it
+      contentLength: buffer.length,
+      addRandomSuffix: true
     });
 
     // 2. Save metadata to individual KV key and update ID list
