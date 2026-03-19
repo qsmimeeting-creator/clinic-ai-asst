@@ -262,20 +262,26 @@ app.post("/api/chat", async (req, res) => {
     let hasText = false;
 
     for (const file of processedFiles) {
-      if (file.fileData && file.mimeType && (file.mimeType.startsWith('image/') || file.mimeType.startsWith('audio/') || file.mimeType.startsWith('video/') || file.mimeType === 'application/pdf')) {
-        // สำหรับไฟล์ Media/PDF
+      // 1. ส่งเนื้อหาข้อความที่สกัดไว้ (เพื่อให้ AI ค้นหาข้อมูลได้เร็วและแม่นยำในส่วน Text)
+      if (file.content) {
+        textContext += `--- เริ่มเนื้อหาเอกสาร: ${file.name} ---\n${file.content}\n--- จบเนื้อหาเอกสาร: ${file.name} ---\n\n`;
+        hasText = true;
+      }
+
+      // 2. ส่งไฟล์ดิบ (Inline Data) ไปด้วยเพื่อให้ AI เห็นโครงสร้างไฟล์จริง (เช่น ตารางใน Excel หรือการจัดรูปเล่มใน Word/PDF)
+      if (file.fileData && file.mimeType) {
         mediaParts.push({
           inlineData: {
             mimeType: file.mimeType,
             data: file.fileData
           }
         });
-        textContext += `\n[แนบไฟล์ Media/PDF: ${file.name}]`;
-        hasText = true;
-      } else if (file.content) {
-        // สำหรับ Text, CSV, Excel ที่ถูกแปลงเป็นข้อความแล้ว
-        textContext += `--- เริ่มเอกสาร: ${file.name} ---\n${file.content}\n--- จบเอกสาร: ${file.name} ---\n\n`;
-        hasText = true;
+        
+        // ถ้าเป็นไฟล์ที่มีแต่ข้อมูลดิบ (เช่น รูปภาพ) แต่ไม่มี content ข้อความ ให้ระบุชื่อไฟล์ใน context ด้วย
+        if (!file.content) {
+          textContext += `\n[แนบไฟล์: ${file.name}]`;
+          hasText = true;
+        }
       }
     }
 
