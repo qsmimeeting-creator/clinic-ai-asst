@@ -143,10 +143,21 @@ const AdminPanel = ({ files, setFiles, categories, setCategories }) => {
     
     const textExts = ['txt', 'csv'];
     const officeExts = ['doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx'];
-    const pdfExts = ['pdf'];
-    const imageExts = ['jpg', 'jpeg', 'png', 'webp', 'tiff'];
-    const audioExts = ['mp3', 'wav', 'm4a', 'aac', 'wma'];
-    const videoExts = ['mp4', 'avi', 'mov', 'mkv', 'wmv', 'flv', 'mpeg'];
+    
+    // Always read file as base64 for uploading to Vercel Blob
+    const base64Data = await new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        const result = e.target?.result;
+        if (typeof result === 'string') {
+          resolve(result.split(',')[1]);
+        } else {
+          reject(new Error('Failed to read file as base64'));
+        }
+      };
+      reader.onerror = (err) => reject(err);
+      reader.readAsDataURL(file);
+    });
 
     if (textExts.includes(ext)) {
       const content = await new Promise((resolve) => {
@@ -155,28 +166,14 @@ const AdminPanel = ({ files, setFiles, categories, setCategories }) => {
         reader.readAsText(file);
       });
       
-      const base64Data = await new Promise<string>((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onload = (e) => {
-          const result = e.target?.result;
-          if (typeof result === 'string') {
-            resolve(result.split(',')[1]);
-          } else {
-            reject(new Error('Failed to read file as base64'));
-          }
-        };
-        reader.onerror = (err) => reject(err);
-        reader.readAsDataURL(file);
-      });
-
       return { type: 'text', content, inlineData: base64Data, mimeType: 'text/plain' };
     } 
     else if (officeExts.includes(ext)) {
       return { 
         type: 'text', 
         content: `[ไฟล์เอกสาร Office: ${file.name}]\nหมายเหตุ: ระบบกำลังประมวลผลข้อมูลจากไฟล์นี้ (ในเวอร์ชันปัจจุบันรองรับการอ่านข้อความจากไฟล์ Text, CSV และไฟล์ Media/PDF เป็นหลัก)`,
-        inlineData: '',
-        mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+        inlineData: base64Data,
+        mimeType: file.type || 'application/octet-stream'
       };
     } 
     else {
@@ -191,20 +188,6 @@ const AdminPanel = ({ files, setFiles, categories, setCategories }) => {
         };
         mimeType = mimeMap[ext] || 'application/octet-stream';
       }
-
-      const base64Data = await new Promise<string>((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onload = (e) => {
-          const result = e.target?.result;
-          if (typeof result === 'string') {
-            resolve(result.split(',')[1]);
-          } else {
-            reject(new Error('Failed to read file as base64'));
-          }
-        };
-        reader.onerror = (err) => reject(err);
-        reader.readAsDataURL(file);
-      });
 
       return { type: 'media', mimeType: mimeType, inlineData: base64Data };
     }
