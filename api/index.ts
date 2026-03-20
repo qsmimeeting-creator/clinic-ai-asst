@@ -81,7 +81,13 @@ app.get("/api/data", async (req, res) => {
     if (fileIds.length > 0) {
       const filePromises = fileIds.map(id => kv.get(`clinic_file:${id}`));
       const results = await Promise.all(filePromises);
-      files.push(...results.filter(f => f !== null));
+      files.push(...results.filter(f => f !== null).map((f: any) => {
+        const { inlineData, content, ...rest } = f;
+        if (rest.url && rest.url.startsWith('data:')) {
+          rest.url = null; // Strip data URI to save bandwidth, frontend will use /api/files/:id/download
+        }
+        return rest;
+      }));
     }
 
     const categories = await kv.get("clinic_categories") || [];
@@ -163,7 +169,11 @@ app.post("/api/upload", async (req, res) => {
     fileIds.unshift(fileId);
     await kv.set("clinic_files_ids", fileIds);
     
-    res.json(newFile);
+    const { inlineData: _, content: __, ...responseFile } = newFile;
+    if (responseFile.url && responseFile.url.startsWith('data:')) {
+      responseFile.url = null as any; // Strip data URI
+    }
+    res.json(responseFile);
   } catch (error: any) {
     console.error("Upload Error:", error);
     res.status(500).json({ 
@@ -214,6 +224,41 @@ app.post("/api/files/:id/status", async (req, res) => {
   }
 });
 
+// Download file
+app.get("/api/files/:id/download", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const file: any = await kv.get(`clinic_file:${id}`);
+    if (!file) {
+      return res.status(404).json({ error: "File not found" });
+    }
+    
+    if (file.url && file.url.startsWith('data:')) {
+      // Return the data URI directly as a file download
+      const [header, base64] = file.url.split(',');
+      const mimeType = header.split(':')[1].split(';')[0];
+      const buffer = Buffer.from(base64, 'base64');
+      
+      res.setHeader('Content-Type', mimeType);
+      res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(file.name)}"`);
+      return res.send(buffer);
+    } else if (file.url) {
+      // Redirect to the real URL
+      return res.redirect(file.url);
+    } else if (file.inlineData) {
+      // Fallback to inlineData if url is missing
+      const buffer = Buffer.from(file.inlineData, 'base64');
+      res.setHeader('Content-Type', file.mimeType || 'application/octet-stream');
+      res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(file.name)}"`);
+      return res.send(buffer);
+    } else {
+      return res.status(404).json({ error: "File content not found" });
+    }
+  } catch (error: any) {
+    res.status(500).json({ error: "Failed to download file", message: error.message });
+  }
+});
+
 // In-memory cache for file contents to reduce Blob/KV calls
 const fileContentCache: Record<string, { data: string, timestamp: number }> = {};
 const CACHE_TTL = 1000 * 60 * 60; // 1 hour
@@ -257,7 +302,10 @@ app.post("/api/chat", async (req, res) => {
     const shuffledKeys = [...envKeys].sort(() => Math.random() - 0.5);
     
     // Prepare data once before trying different API keys
-    const processedFiles = await Promise.all(activeFiles.map(async (file: any) => {
+    const processedFiles = await Promise.all(activeFiles.map(async (clientFile: any) => {
+      // Fetch full file from KV to get inlineData or content if needed
+      const file: any = await kv.get(`clinic_file:${clientFile.id}`) || clientFile;
+
       // Check cache first
       const cacheKey = `content_${file.id}`;
       if (fileContentCache[cacheKey] && (Date.now() - fileContentCache[cacheKey].timestamp < CACHE_TTL)) {
@@ -268,15 +316,19 @@ app.post("/api/chat", async (req, res) => {
       if (file.inlineData) {
         fileData = file.inlineData;
       } else if (file.url) {
-        try {
-          const resp = await fetch(file.url);
-          const arrayBuffer = await resp.arrayBuffer();
-          fileData = Buffer.from(arrayBuffer).toString('base64');
-          
-          // Cache the data
-          fileContentCache[cacheKey] = { data: fileData, timestamp: Date.now() };
-        } catch (e) {
-          console.error(`Error fetching file ${file.name}:`, e);
+        if (file.url.startsWith('data:')) {
+          fileData = file.url.split(',')[1];
+        } else {
+          try {
+            const resp = await fetch(file.url);
+            const arrayBuffer = await resp.arrayBuffer();
+            fileData = Buffer.from(arrayBuffer).toString('base64');
+            
+            // Cache the data
+            fileContentCache[cacheKey] = { data: fileData, timestamp: Date.now() };
+          } catch (e) {
+            console.error(`Error fetching file ${file.name}:`, e);
+          }
         }
       }
       return { ...file, fileData };

@@ -247,7 +247,9 @@ const AdminPanel = ({ files, setFiles, categories, setCategories }: AdminPanelPr
   };
 
   const handleDownload = (file: any) => {
-    if (file.url && !file.url.startsWith('data:')) {
+    if (file.id) {
+      window.open(`/api/files/${file.id}/download`, '_blank');
+    } else if (file.url && !file.url.startsWith('data:')) {
       window.open(file.url, '_blank');
     } else if (file.inlineData) {
       const link = document.createElement('a');
