@@ -385,8 +385,8 @@ app.post("/api/chat", async (req, res) => {
     let headersSent = false;
 
     const modelsToTry = [
-      "gemini-3-flash-preview",
       "gemini-3.1-flash-lite-preview",
+      "gemini-3-flash-preview",
       "gemini-flash-latest"
     ];
 
