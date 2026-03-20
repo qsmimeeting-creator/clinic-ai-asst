@@ -133,7 +133,11 @@ export default function App() {
     const cleanText = text.replace(/[*_~`#]/g, '');
     
     const utterance = new SpeechSynthesisUtterance(cleanText);
-    utterance.lang = 'th-TH';
+    
+    // ตรวจสอบว่ามีภาษาไทยในข้อความหรือไม่
+    const hasThai = /[ก-๙]/.test(cleanText);
+    utterance.lang = hasThai ? 'th-TH' : 'en-US';
+    
     utterance.rate = 1.0;
     
     utterance.onend = () => setSpeakingId(null);
