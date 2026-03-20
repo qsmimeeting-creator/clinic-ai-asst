@@ -3,7 +3,7 @@ import { put, del } from "@vercel/blob";
 import { createClient } from "@vercel/kv";
 import path from "path";
 import { fileURLToPath } from "url";
-import { GoogleGenAI, Type, ThinkingLevel } from "@google/genai";
+import { GoogleGenAI, Type } from "@google/genai";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -100,6 +100,9 @@ app.post("/api/categories", async (req, res) => {
   
   try {
     const { categories } = req.body;
+    if (!Array.isArray(categories)) {
+      return res.status(400).json({ error: "Invalid categories format. Expected an array." });
+    }
     await kv.set("clinic_categories", categories);
     res.json({ success: true });
   } catch (error: any) {
@@ -132,10 +135,14 @@ app.post("/api/upload", async (req, res) => {
   }
 
   try {
-    const { name, category, mimeType, inlineData, size, date } = req.body;
+    const { name, category, mimeType, inlineData, size, date, content } = req.body;
     
-    if (!inlineData) {
-      return res.status(400).json({ error: "No file data provided" });
+    if (!inlineData || typeof inlineData !== 'string') {
+      return res.status(400).json({ error: "No valid file data provided" });
+    }
+
+    if (!name || typeof name !== 'string') {
+      return res.status(400).json({ error: "No valid file name provided" });
     }
 
     // 1. Upload to Vercel Blob
@@ -161,6 +168,7 @@ app.post("/api/upload", async (req, res) => {
       size,
       url: blob.url,
       mimeType,
+      content: content || null,
       inlineData: inlineData.length < 1000000 ? inlineData : null
     };
     
@@ -242,18 +250,29 @@ app.post("/api/chat", async (req, res) => {
   try {
     const { query, activeFiles } = req.body;
     
-    // 1. Get all Keys from Environment Variable
+    if (!query || typeof query !== 'string') {
+      return res.status(400).json({ error: "Invalid query provided." });
+    }
+
+    if (!Array.isArray(activeFiles)) {
+      return res.status(400).json({ error: "Invalid activeFiles format. Expected an array." });
+    }
+    
+    // 1. Get all Keys from Environment Variable and KV Store
     const envKeys = (process.env.GEMINI_API_KEY || "")
       .split(',')
       .map(k => k.trim())
       .filter(k => k !== "");
+      
+    const kvKeys = await kv.get("clinic_gemini_keys") || [];
+    const allKeys = [...new Set([...envKeys, ...(Array.isArray(kvKeys) ? kvKeys : [])])].filter(k => k && typeof k === 'string');
     
-    if (envKeys.length === 0) {
-      return res.status(500).json({ error: "Missing Gemini API Key in Vercel Environment Variables." });
+    if (allKeys.length === 0) {
+      return res.status(500).json({ error: "Missing Gemini API Key. Please add it in Vercel Environment Variables or Admin Panel." });
     }
 
     // Shuffle keys to distribute load
-    const shuffledKeys = [...envKeys].sort(() => Math.random() - 0.5);
+    const shuffledKeys = [...allKeys].sort(() => Math.random() - 0.5);
     
     // Prepare data once before trying different API keys
     const processedFiles = await Promise.all(activeFiles.map(async (file: any) => {
@@ -329,110 +348,134 @@ app.post("/api/chat", async (req, res) => {
     requestParts.push(...mediaParts);
     requestParts.push({ text: `คำถาม: ${query}` });
 
-    // Try each key until one works or all fail
-    for (const apiKey of shuffledKeys) {
-      try {
-        const ai = new GoogleGenAI({ apiKey });
-        
-        const responseStream = await ai.models.generateContentStream({
-          model: "gemini-3-flash-preview",
-          contents: [{ role: "user", parts: requestParts }],
-          config: {
-            systemInstruction: `คุณคือผู้ช่วย AI ของคลินิก (เปรียบเสมือนพยาบาลหรือเจ้าหน้าที่คลินิกที่มีความใส่ใจ เป็นมิตร และน่าเชื่อถือ) และมีบทบาทเป็น "แพทย์ผู้เชี่ยวชาญด้านวัคซีนและภูมิคุ้มกันวิทยา"
-            
-    รูปแบบและน้ำเสียงการตอบ (Format & Tone):
-    - น้ำเสียงสุภาพ เป็นมิตร มีความเห็นอกเห็นใจ (Empathy) และน่าเชื่อถือ ใช้คำลงท้าย "ค่ะ/ครับ" เสมอ
-    - กระชับและแบ่งวรรคตอนให้อ่านง่าย (เหมาะสำหรับอ่านบนหน้าจอมือถือ) หลีกเลี่ยงข้อความที่ยาวติดกันเป็นพรืด
-    - ใช้สัญลักษณ์ (Bullet Points) เพื่อความชัดเจน ในการแจกแจงรายการ เช่น ราคาวัคซีน, เงื่อนไขผู้ที่มีสิทธิ์ฉีด, หรือผลข้างเคียง
-    - **เน้นคำที่สำคัญ** หรือตัวเลขที่สำคัญด้วยตัวหนา (Bold)
-    
-    แหล่งข้อมูลในการตอบคำถาม (สำคัญมาก):
-    1. ข้อมูลบริการของคลินิก (ราคา, โปรโมชั่น, เวลาทำการ, เงื่อนไขการรับบริการ): **ต้องอ้างอิงจาก "ข้อมูลเอกสารของคลินิก" ที่แนบมาให้เท่านั้น** ห้ามคิดคำตอบเองเด็ดขาด
-    2. ความรู้ทางการแพทย์เรื่องวัคซีน: อนุญาตให้ใช้ความรู้ทางการแพทย์ระดับผู้เชี่ยวชาญเพื่ออธิบายสรรพคุณ, ผลข้างเคียง, ข้อห้ามใช้, กลไกการออกฤทธิ์, หรือคำแนะนำตามช่วงวัย
-    
-    เนื้อหาที่ต้องมี (Content Rules):
-    1. การตอบตรงตามเอกสาร (Strict Grounding): หากข้อมูลบริการของคลินิกไม่มีในเอกสาร ให้ตอบตามตรงว่า "ไม่มีข้อมูลในส่วนนี้" หรือ "กรุณาสอบถามเจ้าหน้าที่" ห้ามเดาหรือแต่งเติมข้อมูลบริการเองเด็ดขาด
-    2. ข้อมูลจำเป็นพื้นฐาน: หากผู้ใช้ถามกว้างๆ ควรให้ข้อมูลที่จำเป็นครบถ้วน เช่น ชนิดของวัคซีน, ราคา, จำนวนเข็มที่ต้องฉีด, และระยะห่างระหว่างเข็ม
-    3. เงื่อนไขและข้อห้าม (Contraindications): หากวัคซีนตัวนั้นมีข้อห้ามสำหรับคนบางกลุ่ม (เช่น หญิงตั้งครรภ์, ผู้แพ้ยาบางชนิด) หรือมีเงื่อนไขเรื่องอายุ ให้เน้นย้ำข้อมูลส่วนนี้ให้เด่นชัด และปฏิเสธอย่างสุภาพหากผู้ใช้ไม่ตรงเงื่อนไข
-    4. คำเตือนทางการแพทย์ (Medical Disclaimer): หากมีการให้คำแนะนำด้านสุขภาพ ต้องมีข้อความสงวนสิทธิ์สั้นๆ เช่น "ข้อมูลนี้เป็นเพียงข้อมูลเบื้องต้น หากท่านมีโรคประจำตัว กรุณาปรึกษาแพทย์ก่อนรับวัคซีน"
-    5. นโยบายการเข้ารับบริการ (Walk-in Only): **คลินิกให้บริการแบบ Walk-in เท่านั้น ไม่มีการนัดหมายล่วงหน้า** ห้ามเสนอให้ผู้ใช้จองคิวหรือนัดหมายแพทย์โดยเด็ดขาด หากผู้ใช้ถามเรื่องการจองคิว ให้แจ้งว่าสามารถเข้ามาติดต่อที่คลินิกได้เลย
-    6. การแจ้งเวลาทำการ: ทุกครั้งที่มีการแจ้ง **เวลาทำการของคลินิก** จะต้องแจ้ง **เวลาปิดรับบัตร** ควบคู่ไปด้วยเสมอ (อ้างอิงเวลาปิดรับบัตรจากเอกสารของคลินิก)
-    7. Call to Action: ปิดท้ายด้วยข้อความนี้เสมอ "ต้องการสอบถามข้อมูลอื่นเพิ่มไหมคะ" หรือ "ต้องการสอบถามข้อมูลอื่นเพิ่มไหมครับ"
-    
-    กฎเกณฑ์การประมวลผล (Processing Rules):
-    - การวินิจฉัย/การแพทย์: หากคำถามเป็นเรื่องการวินิจฉัยโรค สั่งยา หรืออาการเจ็บป่วยฉุกเฉิน ให้กำหนด status เป็น "out_of_scope" และแนะนำให้พบแพทย์ทันที
-    - การตรวจจับความกำกวม: หากคำถามกว้างเกินไป ให้กำหนด status เป็น "clarification_needed" และถามกลับอย่างสุภาพ
-    - ตอบคำถามได้: หากตอบได้ชัดเจน ให้กำหนด status เป็น "answered" พร้อมใส่ชื่อไฟล์ที่ใช้อ้างอิงลงใน array citations
-    
-    ขั้นตอนการตรวจสอบ (Self-Correction ก่อนตอบ):
-    - ตรวจสอบว่ามีคำลงท้าย ค่ะ/ครับ หรือไม่?
-    - ตรวจสอบว่ามีการแบ่งวรรคตอนและใช้ Bullet points หรือไม่?
-    - ตรวจสอบว่ามี Medical Disclaimer และปิดท้ายด้วย "ต้องการสอบถามข้อมูลอื่นเพิ่มไหมคะ/ครับ" หรือไม่?
-    - หากมีการแจ้งเวลาทำการ ได้แจ้งเวลาปิดรับบัตรด้วยหรือไม่?
-    - ข้อมูลราคาและบริการมาจากเอกสารจริงหรือไม่?`,
-            temperature: 0.0,
-            thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
-            responseMimeType: "application/json",
-            responseSchema: {
-              type: Type.OBJECT,
-              properties: {
-                status: { type: Type.STRING, enum: ["answered", "no_answer", "clarification_needed", "out_of_scope", "conflict_detected"] },
-                short_answer: { type: Type.STRING },
-                answer: { type: Type.STRING },
-                confidence: { type: Type.NUMBER },
-                missing_fields: {
-                  type: Type.ARRAY,
-                  items: { type: Type.STRING },
-                  description: "รายการข้อมูลที่ขาดหายไปหรือต้องการความชัดเจนเพิ่ม"
-                },
-                citations: {
-                  type: Type.ARRAY,
-                  items: {
-                    type: Type.OBJECT,
-                    properties: {
-                      file_name: { type: Type.STRING },
-                      locator: { type: Type.STRING }
+    let headersSent = false;
+
+    const modelsToTry = [
+      "gemini-3-flash-preview",
+      "gemini-3.1-flash-lite-preview",
+      "gemini-flash-latest"
+    ];
+
+    // Try each model and each key until one works or all fail
+    for (const modelName of modelsToTry) {
+      for (const apiKey of shuffledKeys) {
+        try {
+          const ai = new GoogleGenAI({ apiKey });
+          
+          const responseStream = await ai.models.generateContentStream({
+            model: modelName,
+            contents: [{ role: "user", parts: requestParts }],
+            config: {
+              systemInstruction: `คุณคือผู้ช่วย AI ของคลินิก (เปรียบเสมือนพยาบาลหรือเจ้าหน้าที่คลินิกที่มีความใส่ใจ เป็นมิตร และน่าเชื่อถือ) และมีบทบาทเป็น "แพทย์ผู้เชี่ยวชาญด้านวัคซีนและภูมิคุ้มกันวิทยา"
+              
+      รูปแบบและน้ำเสียงการตอบ (Format & Tone):
+      - น้ำเสียงสุภาพ เป็นมิตร มีความเห็นอกเห็นใจ (Empathy) และน่าเชื่อถือ ใช้คำลงท้าย "ค่ะ/ครับ" เสมอ
+      - กระชับและแบ่งวรรคตอนให้อ่านง่าย (เหมาะสำหรับอ่านบนหน้าจอมือถือ) หลีกเลี่ยงข้อความที่ยาวติดกันเป็นพรืด
+      - ใช้สัญลักษณ์ (Bullet Points) เพื่อความชัดเจน ในการแจกแจงรายการ เช่น ราคาวัคซีน, เงื่อนไขผู้ที่มีสิทธิ์ฉีด, หรือผลข้างเคียง
+      - **เน้นคำที่สำคัญ** หรือตัวเลขที่สำคัญด้วยตัวหนา (Bold)
+      
+      แหล่งข้อมูลในการตอบคำถาม (สำคัญมาก):
+      1. ข้อมูลบริการของคลินิก (ราคา, โปรโมชั่น, เวลาทำการ, เงื่อนไขการรับบริการ): **ต้องอ้างอิงจาก "ข้อมูลเอกสารของคลินิก" ที่แนบมาให้เท่านั้น** ห้ามคิดคำตอบเองเด็ดขาด
+      2. ความรู้ทางการแพทย์เรื่องวัคซีน: อนุญาตให้ใช้ความรู้ทางการแพทย์ระดับผู้เชี่ยวชาญเพื่ออธิบายสรรพคุณ, ผลข้างเคียง, ข้อห้ามใช้, กลไกการออกฤทธิ์, หรือคำแนะนำตามช่วงวัย
+      
+      เนื้อหาที่ต้องมี (Content Rules):
+      1. การตอบตรงตามเอกสาร (Strict Grounding): หากข้อมูลบริการของคลินิกไม่มีในเอกสาร ให้ตอบตามตรงว่า "ไม่มีข้อมูลในส่วนนี้" หรือ "กรุณาสอบถามเจ้าหน้าที่" ห้ามเดาหรือแต่งเติมข้อมูลบริการเองเด็ดขาด
+      2. ข้อมูลจำเป็นพื้นฐาน: หากผู้ใช้ถามกว้างๆ ควรให้ข้อมูลที่จำเป็นครบถ้วน เช่น ชนิดของวัคซีน, ราคา, จำนวนเข็มที่ต้องฉีด, และระยะห่างระหว่างเข็ม
+      3. เงื่อนไขและข้อห้าม (Contraindications): หากวัคซีนตัวนั้นมีข้อห้ามสำหรับคนบางกลุ่ม (เช่น หญิงตั้งครรภ์, ผู้แพ้ยาบางชนิด) หรือมีเงื่อนไขเรื่องอายุ ให้เน้นย้ำข้อมูลส่วนนี้ให้เด่นชัด และปฏิเสธอย่างสุภาพหากผู้ใช้ไม่ตรงเงื่อนไข
+      4. คำเตือนทางการแพทย์ (Medical Disclaimer): หากมีการให้คำแนะนำด้านสุขภาพ ต้องมีข้อความสงวนสิทธิ์สั้นๆ เช่น "ข้อมูลนี้เป็นเพียงข้อมูลเบื้องต้น หากท่านมีโรคประจำตัว กรุณาปรึกษาแพทย์ก่อนรับวัคซีน"
+      5. นโยบายการเข้ารับบริการ (Walk-in Only): **คลินิกให้บริการแบบ Walk-in เท่านั้น ไม่มีการนัดหมายล่วงหน้า** ห้ามเสนอให้ผู้ใช้จองคิวหรือนัดหมายแพทย์โดยเด็ดขาด หากผู้ใช้ถามเรื่องการจองคิว ให้แจ้งว่าสามารถเข้ามาติดต่อที่คลินิกได้เลย
+      6. การแจ้งเวลาทำการ: ทุกครั้งที่มีการแจ้ง **เวลาทำการของคลินิก** จะต้องแจ้ง **เวลาปิดรับบัตร** ควบคู่ไปด้วยเสมอ (อ้างอิงเวลาปิดรับบัตรจากเอกสารของคลินิก)
+      7. Call to Action: ปิดท้ายด้วยข้อความนี้เสมอ "ต้องการสอบถามข้อมูลอื่นเพิ่มไหมคะ" หรือ "ต้องการสอบถามข้อมูลอื่นเพิ่มไหมครับ"
+      
+      กฎเกณฑ์การประมวลผล (Processing Rules):
+      - การวินิจฉัย/การแพทย์: หากคำถามเป็นเรื่องการวินิจฉัยโรค สั่งยา หรืออาการเจ็บป่วยฉุกเฉิน ให้กำหนด status เป็น "out_of_scope" และแนะนำให้พบแพทย์ทันที
+      - การตรวจจับความกำกวม: หากคำถามกว้างเกินไป ให้กำหนด status เป็น "clarification_needed" และถามกลับอย่างสุภาพ
+      - ตอบคำถามได้: หากตอบได้ชัดเจน ให้กำหนด status เป็น "answered" พร้อมใส่ชื่อไฟล์ที่ใช้อ้างอิงลงใน array citations
+      
+      ขั้นตอนการตรวจสอบ (Self-Correction ก่อนตอบ):
+      - ตรวจสอบว่ามีคำลงท้าย ค่ะ/ครับ หรือไม่?
+      - ตรวจสอบว่ามีการแบ่งวรรคตอนและใช้ Bullet points หรือไม่?
+      - ตรวจสอบว่ามี Medical Disclaimer และปิดท้ายด้วย "ต้องการสอบถามข้อมูลอื่นเพิ่มไหมคะ/ครับ" หรือไม่?
+      - หากมีการแจ้งเวลาทำการ ได้แจ้งเวลาปิดรับบัตรด้วยหรือไม่?
+      - ข้อมูลราคาและบริการมาจากเอกสารจริงหรือไม่?`,
+              temperature: 0.0,
+              responseMimeType: "application/json",
+              responseSchema: {
+                type: Type.OBJECT,
+                properties: {
+                  status: { type: Type.STRING, enum: ["answered", "no_answer", "clarification_needed", "out_of_scope", "conflict_detected"] },
+                  short_answer: { type: Type.STRING },
+                  answer: { type: Type.STRING },
+                  confidence: { type: Type.NUMBER },
+                  missing_fields: {
+                    type: Type.ARRAY,
+                    items: { type: Type.STRING },
+                    description: "รายการข้อมูลที่ขาดหายไปหรือต้องการความชัดเจนเพิ่ม"
+                  },
+                  citations: {
+                    type: Type.ARRAY,
+                    items: {
+                      type: Type.OBJECT,
+                      properties: {
+                        file_name: { type: Type.STRING },
+                        locator: { type: Type.STRING }
+                      }
                     }
                   }
-                }
-              },
-              required: ["status", "answer"]
+                },
+                required: ["status", "answer"]
+              }
+            }
+          });
+
+          // Setup SSE for streaming
+          if (!headersSent) {
+            res.setHeader('Content-Type', 'text/event-stream');
+            res.setHeader('Cache-Control', 'no-cache');
+            res.setHeader('Connection', 'keep-alive');
+            res.setHeader('X-Accel-Buffering', 'no'); // Disable buffering for Nginx
+            headersSent = true;
+          }
+
+          for await (const chunk of responseStream) {
+            if (chunk.text) {
+              res.write(`data: ${JSON.stringify({ chunk: chunk.text })}\n\n`);
             }
           }
-        });
+          
+          res.write(`data: [DONE]\n\n`);
+          res.end();
+          return; // Success! Exit the loop and function
 
-        // Setup SSE for streaming
-        res.setHeader('Content-Type', 'text/event-stream');
-        res.setHeader('Cache-Control', 'no-cache');
-        res.setHeader('Connection', 'keep-alive');
-        res.setHeader('X-Accel-Buffering', 'no'); // Disable buffering for Nginx
-
-        for await (const chunk of responseStream) {
-          if (chunk.text) {
-            res.write(`data: ${JSON.stringify({ chunk: chunk.text })}\n\n`);
+        } catch (error: any) {
+          lastError = error;
+          const errorMsg = error.message || "";
+          
+          if (headersSent) {
+            // If headers are already sent, we cannot try another key or send a 500 status.
+            // We must just end the stream with an error message.
+            console.error(`API Error during streaming with model ${modelName}:`, errorMsg);
+            res.write(`data: ${JSON.stringify({ chunk: "\n\n[ข้อผิดพลาด: การเชื่อมต่อถูกตัดขาดชั่วคราว]" })}\n\n`);
+            res.write(`data: [DONE]\n\n`);
+            res.end();
+            return;
           }
-        }
-        
-        res.write(`data: [DONE]\n\n`);
-        res.end();
-        return; // Success! Exit the loop and function
 
-      } catch (error: any) {
-        lastError = error;
-        const errorMsg = error.message || "";
-        if (errorMsg.includes("429") || errorMsg.toLowerCase().includes("quota") || errorMsg.toLowerCase().includes("too many requests")) {
-          console.warn(`API Key quota exceeded, trying next key...`);
-          continue;
-        } else {
-          console.error(`API Error with current key:`, errorMsg);
-          continue;
+          if (errorMsg.includes("429") || errorMsg.toLowerCase().includes("quota") || errorMsg.toLowerCase().includes("too many requests")) {
+            console.warn(`API Key quota exceeded for model ${modelName}, trying next key/model...`);
+            continue;
+          } else {
+            console.error(`API Error with current key for model ${modelName}:`, errorMsg);
+            continue;
+          }
         }
       }
     }
 
     // If we get here, all keys failed
-    res.status(500).write(`data: ${JSON.stringify({ error: "All API keys failed or were exhausted." })}\n\n`);
-    res.end();
+    if (!headersSent) {
+      res.status(500).json({ error: "All API keys failed or were exhausted." });
+    }
   } catch (error: any) {
     console.error("Gemini API error:", error);
     res.status(500).json({

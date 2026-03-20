@@ -13,6 +13,7 @@ interface Message {
   citations?: any[];
   conflicts?: any[];
   missing_fields?: any[];
+  responseTime?: number;
 }
 
 interface MessageItemProps {
@@ -200,6 +201,7 @@ const MessageItem = memo(({ msg, speakingId, toggleSpeech }: MessageItemProps) =
   return (
     prevProps.msg.text === nextProps.msg.text &&
     prevProps.msg.isStreaming === nextProps.msg.isStreaming &&
+    prevProps.msg.responseTime === nextProps.msg.responseTime &&
     prevProps.speakingId === nextProps.speakingId &&
     (prevProps.speakingId !== prevProps.msg.id && nextProps.speakingId !== nextProps.msg.id)
   );

@@ -17,6 +17,7 @@ interface Message {
   citations?: any[];
   conflicts?: any[];
   missing_fields?: any[];
+  responseTime?: number;
 }
 
 // --- REAL AI BACKEND (Using Gemini API with Context Stuffing & Multimodal) ---
@@ -64,6 +65,7 @@ export default function App() {
   const [showAuthModal, setShowAuthModal] = useState(false);
 
   const [isListening, setIsListening] = useState(false);
+  const [isSpeechSupported, setIsSpeechSupported] = useState(false);
   const [speakingId, setSpeakingId] = useState(null);
   const recognitionRef = useRef(null);
 
@@ -82,6 +84,7 @@ export default function App() {
   useEffect(() => {
     const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
     if (SpeechRecognition) {
+      setIsSpeechSupported(true);
       recognitionRef.current = new SpeechRecognition();
       recognitionRef.current.continuous = false;
       recognitionRef.current.lang = 'th-TH';
@@ -159,6 +162,7 @@ export default function App() {
     setMessages(prev => [...prev, userMsg]);
     setIsTyping(true);
 
+    const startTime = Date.now();
     const botMsgId = Date.now() + 1;
     // เพิ่มข้อความเริ่มต้นของ AI (สถานะกำลังพิมพ์)
     setMessages(prev => [...prev, {
@@ -238,6 +242,9 @@ export default function App() {
       }
 
       // เมื่อสตรีมจบ พยายาม parse JSON ตัวเต็มเพื่อดึง metadata อื่นๆ
+      const endTime = Date.now();
+      const responseTime = (endTime - startTime) / 1000;
+
       try {
         const finalData = JSON.parse(fullRawResponse);
         setMessages(prev => prev.map(m => 
@@ -249,13 +256,14 @@ export default function App() {
             citations: finalData.citations,
             conflicts: finalData.conflicts,
             missing_fields: finalData.missing_fields,
-            isStreaming: false
+            isStreaming: false,
+            responseTime
           } : m
         ));
       } catch (e) {
         console.error("Final JSON parse error:", e);
         setMessages(prev => prev.map(m => 
-          m.id === botMsgId ? { ...m, isStreaming: false } : m
+          m.id === botMsgId ? { ...m, isStreaming: false, responseTime } : m
         ));
       }
 
@@ -392,17 +400,19 @@ export default function App() {
                       }`}
                       disabled={isTyping}
                     />
-                    <button
-                      type="button"
-                      onClick={handleMicClick}
-                      disabled={isTyping}
-                      className={`absolute right-2 top-1/2 -translate-y-1/2 p-2 rounded-full transition-all ${
-                        isListening ? 'text-[#B11226] bg-[#fad4d8] animate-pulse' : 'text-gray-400 hover:text-[#B11226] hover:bg-gray-200'
-                      }`}
-                      title="พิมพ์ด้วยเสียง"
-                    >
-                      <Mic size={18} />
-                    </button>
+                    {isSpeechSupported && (
+                      <button
+                        type="button"
+                        onClick={handleMicClick}
+                        disabled={isTyping}
+                        className={`absolute right-2 top-1/2 -translate-y-1/2 p-2 rounded-full transition-all ${
+                          isListening ? 'text-[#B11226] bg-[#fad4d8] animate-pulse' : 'text-gray-400 hover:text-[#B11226] hover:bg-gray-200'
+                        }`}
+                        title="พิมพ์ด้วยเสียง"
+                      >
+                        <Mic size={18} />
+                      </button>
+                    )}
                   </div>
                   <button
                     type="submit"

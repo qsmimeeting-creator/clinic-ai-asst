@@ -2,7 +2,7 @@ import React, { useState, useRef } from 'react';
 import { 
   Upload, FileText, Trash2, Activity, FileArchive, CheckCircle, 
   Plus, Tag, X, Image, Music, Video, File, FileSpreadsheet,
-  AlertCircle, Info, ChevronDown, ChevronUp, ToggleLeft, ToggleRight
+  AlertCircle, Info, ChevronDown, ChevronUp, ToggleLeft, ToggleRight, Download
 } from 'lucide-react';
 import mammoth from 'mammoth';
 import * as XLSX from 'xlsx';
@@ -32,6 +32,12 @@ const AdminPanel = ({ files, setFiles, categories, setCategories }: AdminPanelPr
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [isDragging, setIsDragging] = useState(false);
   const [visibleCount, setVisibleCount] = useState(5);
+
+  React.useEffect(() => {
+    if (!uploadCategory && categories.length > 0) {
+      setUploadCategory(categories[0].id);
+    }
+  }, [categories, uploadCategory]);
 
   const getCategoryName = (id: string) => {
     const cat = categories.find(c => c.id === id);
@@ -173,6 +179,7 @@ const AdminPanel = ({ files, setFiles, categories, setCategories }: AdminPanelPr
           category: uploadCategory,
           mimeType: processedData.mimeType,
           inlineData: processedData.inlineData,
+          content: processedData.content || null,
           size: (selectedFile.size / (1024 * 1024)).toFixed(2) + ' MB',
           date: new Date().toISOString().split('T')[0]
         })
@@ -237,6 +244,28 @@ const AdminPanel = ({ files, setFiles, categories, setCategories }: AdminPanelPr
         }
       }
     });
+  };
+
+  const handleDownload = (file: any) => {
+    if (file.url && !file.url.startsWith('data:')) {
+      window.open(file.url, '_blank');
+    } else if (file.inlineData) {
+      const link = document.createElement('a');
+      link.href = `data:${file.mimeType || 'application/octet-stream'};base64,${file.inlineData}`;
+      link.download = file.name;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+    } else if (file.url && file.url.startsWith('data:')) {
+      const link = document.createElement('a');
+      link.href = file.url;
+      link.download = file.name;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+    } else {
+      setModal({ isOpen: true, title: 'ไม่สามารถดาวน์โหลดได้', message: 'ไม่พบข้อมูลไฟล์สำหรับดาวน์โหลด', type: 'alert', onConfirm: null });
+    }
   };
 
   const handleAddCategory = async () => {
@@ -470,6 +499,13 @@ const AdminPanel = ({ files, setFiles, categories, setCategories }: AdminPanelPr
                           </div>
                         </div>
                         <div className="flex items-center space-x-1 sm:space-x-2">
+                          <button 
+                            onClick={() => handleDownload(file)}
+                            className="p-2 text-blue-500 hover:bg-blue-50 rounded-lg transition-colors"
+                            title="ดาวน์โหลดเอกสาร"
+                          >
+                            <Download size={18} />
+                          </button>
                           <button 
                             onClick={() => toggleStatus(file.id)}
                             className={`p-2 rounded-lg transition-colors ${file.status === 'active' ? 'text-green-600 hover:bg-green-50' : 'text-gray-400 hover:bg-gray-100'}`}
