@@ -20,8 +20,7 @@ const memoryStore: Record<string, any> = {
   "clinic_categories": [
     { id: "cat_1", name: "ข้อมูลทั่วไป" },
     { id: "cat_2", name: "ระเบียบการคลินิก" }
-  ],
-  "clinic_gemini_keys": []
+  ]
 };
 
 const kv = hasKVConfig ? createClient({
@@ -85,8 +84,7 @@ app.get("/api/data", async (req, res) => {
     }
 
     const categories = await kv.get("clinic_categories") || [];
-    const geminiKeys = await kv.get("clinic_gemini_keys") || [];
-    res.json({ files, categories, geminiKeys });
+    res.json({ files, categories });
   } catch (error: any) {
     console.error("KV Error:", error);
     res.status(500).json({ error: "KV Connection Error", message: error.message });
@@ -107,20 +105,6 @@ app.post("/api/categories", async (req, res) => {
     res.json({ success: true });
   } catch (error: any) {
     res.status(500).json({ error: "Failed to save categories", message: error.message });
-  }
-});
-
-// Save Gemini API Keys
-app.post("/api/keys", async (req, res) => {
-  const missing = checkEnv();
-  if (missing.length > 0) return res.status(500).json({ error: `Missing: ${missing.join(", ")}` });
-  
-  try {
-    const { keys } = req.body;
-    await kv.set("clinic_gemini_keys", keys);
-    res.json({ success: true });
-  } catch (error: any) {
-    res.status(500).json({ error: "Failed to save API keys", message: error.message });
   }
 });
 
@@ -258,21 +242,18 @@ app.post("/api/chat", async (req, res) => {
       return res.status(400).json({ error: "Invalid activeFiles format. Expected an array." });
     }
     
-    // 1. Get all Keys from Environment Variable and KV Store
+    // 1. Get all Keys from Environment Variable
     const envKeys = (process.env.GEMINI_API_KEY || "")
       .split(',')
       .map(k => k.trim())
       .filter(k => k !== "");
-      
-    const kvKeys = await kv.get("clinic_gemini_keys") || [];
-    const allKeys = [...new Set([...envKeys, ...(Array.isArray(kvKeys) ? kvKeys : [])])].filter(k => k && typeof k === 'string');
     
-    if (allKeys.length === 0) {
-      return res.status(500).json({ error: "Missing Gemini API Key. Please add it in Vercel Environment Variables or Admin Panel." });
+    if (envKeys.length === 0) {
+      return res.status(500).json({ error: "Missing Gemini API Key in Vercel Environment Variables." });
     }
 
     // Shuffle keys to distribute load
-    const shuffledKeys = [...allKeys].sort(() => Math.random() - 0.5);
+    const shuffledKeys = [...envKeys].sort(() => Math.random() - 0.5);
     
     // Prepare data once before trying different API keys
     const processedFiles = await Promise.all(activeFiles.map(async (file: any) => {
