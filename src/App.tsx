@@ -183,8 +183,14 @@ export default function App() {
       });
 
       if (!response.ok) {
-        const errorData = await response.json();
-        throw new Error(errorData.error || "Failed to connect to AI");
+        let errorMessage = "Failed to connect to AI";
+        try {
+          const errorData = await response.json();
+          errorMessage = errorData.error || errorData.details || errorMessage;
+        } catch (e) {
+          errorMessage = `Server returned status ${response.status}`;
+        }
+        throw new Error(errorMessage);
       }
 
       const reader = response.body?.getReader();
@@ -267,14 +273,14 @@ export default function App() {
         ));
       }
 
-    } catch (error) {
+    } catch (error: any) {
       console.error("Chat error:", error);
       setMessages(prev => prev.map(m => 
         m.id === botMsgId ? {
           id: m.id,
           sender: 'bot',
           type: 'system_error',
-          text: 'ขออภัยครับ ระบบประมวลผลขัดข้องชั่วคราว กรุณาลองใหม่อีกครั้ง หรืออาจเป็นเพราะไฟล์แนบมีขนาดใหญ่เกินไป',
+          text: `ขออภัยครับ ระบบประมวลผลขัดข้องชั่วคราว: ${error.message || 'ไม่ทราบสาเหตุ'} กรุณาลองใหม่อีกครั้ง`,
           isStreaming: false
         } : m
       ));
