@@ -4,9 +4,25 @@ import { put, del } from "@vercel/blob";
 import { createClient } from "@vercel/kv";
 import path from "path";
 import { fileURLToPath } from "url";
-import { GoogleGenAI, Type } from "@google/genai";
+import { GoogleGenAI, Type, ThinkingLevel } from "@google/genai";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+// Initialize Gemini AI
+const getAI = (apiKey: string) => new GoogleGenAI({ apiKey });
+
+// Helper for Cosine Similarity
+function cosineSimilarity(vecA: number[], vecB: number[]) {
+  let dotProduct = 0;
+  let normA = 0;
+  let normB = 0;
+  for (let i = 0; i < vecA.length; i++) {
+    dotProduct += vecA[i] * vecB[i];
+    normA += vecA[i] * vecA[i];
+    normB += vecB[i] * vecB[i];
+  }
+  return dotProduct / (Math.sqrt(normA) * Math.sqrt(normB));
+}
 
 // Initialize KV with fallback for different environment variable names
 const hasKVConfig = (process.env.KV_REST_API_URL && process.env.KV_REST_API_TOKEN) || 
@@ -148,6 +164,26 @@ app.post("/api/upload", async (req, res) => {
       addRandomSuffix: true
     }) : await mockPut(name, buffer, { contentType: mimeType });
 
+    // 1.5 Generate Embedding for the content (Phase 2: Ingestion)
+    let embedding = null;
+    if (content && content.length > 10) {
+      try {
+        const envKeys = (process.env.GEMINI_API_KEY || "").split(',').map(k => k.trim()).filter(k => k !== "");
+        if (envKeys.length > 0) {
+          const ai = getAI(envKeys[0]);
+          const result = await ai.models.embedContent({
+            model: 'gemini-embedding-2-preview',
+            contents: [content.substring(0, 10000)], // Limit for embedding
+          });
+          if (result.embeddings && result.embeddings.length > 0) {
+            embedding = result.embeddings[0].values;
+          }
+        }
+      } catch (e) {
+        console.error("Embedding generation failed:", e);
+      }
+    }
+
     // 2. Save metadata to individual KV key and update ID list
     const fileId = `file_${Date.now()}`;
     const newFile = {
@@ -160,6 +196,7 @@ app.post("/api/upload", async (req, res) => {
       url: blob.url,
       mimeType,
       content: content || null,
+      embedding: embedding,
       inlineData: inlineData.length < 1000000 ? inlineData : null
     };
     
@@ -300,48 +337,53 @@ app.post("/api/chat", async (req, res) => {
 
     // Shuffle keys to distribute load
     const shuffledKeys = [...envKeys].sort(() => Math.random() - 0.5);
-    
-    // Prepare data once before trying different API keys
-    const processedFiles = await Promise.all(activeFiles.map(async (clientFile: any) => {
-      // Fetch full file from KV to get inlineData or content if needed
-      const file: any = await kv.get(`clinic_file:${clientFile.id}`) || clientFile;
+    const primaryKey = shuffledKeys[0];
+    const ai = new GoogleGenAI({ apiKey: primaryKey });
 
-      // Check cache first
-      const cacheKey = `content_${file.id}`;
-      if (fileContentCache[cacheKey] && (Date.now() - fileContentCache[cacheKey].timestamp < CACHE_TTL)) {
-        return { ...file, fileData: fileContentCache[cacheKey].data };
+    // 1. Semantic Search / Retrieval (Phase 2: Query Time)
+    // Embed the query
+    let queryEmbedding = null;
+    try {
+      const embedResult = await ai.models.embedContent({
+        model: 'gemini-embedding-2-preview',
+        contents: [query],
+      });
+      if (embedResult.embeddings && embedResult.embeddings.length > 0) {
+        queryEmbedding = embedResult.embeddings[0].values;
       }
+    } catch (e) {
+      console.error("Query embedding failed:", e);
+    }
 
-      let fileData = null;
-      if (file.inlineData) {
-        fileData = file.inlineData;
-      } else if (file.url) {
-        if (file.url.startsWith('data:')) {
-          fileData = file.url.split(',')[1];
-        } else {
-          try {
-            const resp = await fetch(file.url);
-            const arrayBuffer = await resp.arrayBuffer();
-            fileData = Buffer.from(arrayBuffer).toString('base64');
-            
-            // Cache the data
-            fileContentCache[cacheKey] = { data: fileData, timestamp: Date.now() };
-          } catch (e) {
-            console.error(`Error fetching file ${file.name}:`, e);
-          }
-        }
+    // 2. Fetch and Rank Files
+    const allFiles = await Promise.all(activeFiles.map(async (f: any) => {
+      const fullFile: any = await kv.get(`clinic_file:${f.id}`);
+      if (!fullFile) return null;
+      
+      let score = 0;
+      if (queryEmbedding && fullFile.embedding) {
+        score = cosineSimilarity(queryEmbedding, fullFile.embedding);
+      } else {
+        // Fallback to simple keyword match if embedding fails
+        const q = query.toLowerCase();
+        if (fullFile.name.toLowerCase().includes(q)) score += 0.5;
+        if (fullFile.content && fullFile.content.toLowerCase().includes(q)) score += 0.3;
       }
-      return { ...file, fileData };
+      return { ...fullFile, score };
     }));
 
-    let lastError = null;
+    // Filter and sort by relevance
+    const relevantFiles = allFiles
+      .filter(f => f !== null)
+      .sort((a, b) => b.score - a.score)
+      .slice(0, 5); // Take top 5 most relevant files
 
-    // Prepare context once with chunking for large text
-    let textContext = "ข้อมูลเอกสารของคลินิก:\n";
+    // 3. Prepare context with ONLY relevant files
+    let textContext = "ข้อมูลเอกสารที่เกี่ยวข้องของคลินิก:\n";
     let mediaParts = [];
-    let hasText = false;
+    let hasRelevantContent = false;
 
-    for (const file of processedFiles) {
+    for (const file of relevantFiles) {
       const isMultimodal = file.mimeType && (
         file.mimeType.startsWith('image/') || 
         file.mimeType.startsWith('audio/') || 
@@ -350,33 +392,44 @@ app.post("/api/chat", async (req, res) => {
       );
 
       if (isMultimodal) {
-        if (file.fileData) {
-          mediaParts.push({
-            inlineData: { mimeType: file.mimeType, data: file.fileData }
-          });
+        // For multimodal, we only do this for the TOP 2 most relevant multimodal files to save bandwidth
+        if (mediaParts.length < 2) {
+          let fileData = file.inlineData;
+          if (!fileData && file.url) {
+            if (file.url.startsWith('data:')) {
+              fileData = file.url.split(',')[1];
+            } else {
+              try {
+                const resp = await fetch(file.url);
+                const arrayBuffer = await resp.arrayBuffer();
+                fileData = Buffer.from(arrayBuffer).toString('base64');
+              } catch (e) {
+                console.error(`Error fetching media ${file.name}:`, e);
+              }
+            }
+          }
+          
+          if (fileData) {
+            mediaParts.push({
+              inlineData: { mimeType: file.mimeType, data: fileData }
+            });
+          }
         }
+        
         if (file.content) {
-          const chunks = chunkText(file.content, 3000);
-          textContext += `--- เนื้อหาจากไฟล์ ${file.name} ---\n${chunks[0]}\n\n`; // Use first chunk for context if too large
-        } else {
-          textContext += `\n[แนบไฟล์สื่อ: ${file.name}]`;
+          textContext += `--- เนื้อหาจากไฟล์ ${file.name} (ความเกี่ยวข้อง: ${Math.round(file.score * 100)}%) ---\n${file.content.substring(0, 3000)}\n\n`;
         }
-        hasText = true;
+        hasRelevantContent = true;
       } else {
         if (file.content) {
-          const chunks = chunkText(file.content, 5000);
-          textContext += `--- เนื้อหาเอกสาร: ${file.name} ---\n${chunks.join('\n[...]\n')}\n\n`;
-          hasText = true;
+          textContext += `--- เนื้อหาเอกสาร: ${file.name} (ความเกี่ยวข้อง: ${Math.round(file.score * 100)}%) ---\n${file.content.substring(0, 5000)}\n\n`;
+          hasRelevantContent = true;
         }
       }
     }
 
-    if (!hasText && mediaParts.length === 0) {
-      textContext = "ไม่มีข้อมูลเอกสารในระบบขณะนี้";
-    }
-
     const requestParts = [];
-    if (hasText || mediaParts.length === 0) {
+    if (hasRelevantContent) {
       requestParts.push({ text: textContext });
     }
     requestParts.push(...mediaParts);
@@ -390,35 +443,38 @@ app.post("/api/chat", async (req, res) => {
       "gemini-flash-latest"
     ];
 
+    let lastError = null;
+
     // Try each model and each key until one works or all fail
     for (const modelName of modelsToTry) {
       for (const apiKey of shuffledKeys) {
         try {
-          const ai = new GoogleGenAI({ apiKey });
+          const currentAi = new GoogleGenAI({ apiKey });
           
-          const responseStream = await ai.models.generateContentStream({
+          const responseStream = await currentAi.models.generateContentStream({
             model: modelName,
             contents: { parts: requestParts },
             config: {
+              thinkingConfig: { thinkingLevel: ThinkingLevel.LOW }, // Phase 1: Reduce thinking latency
               systemInstruction: `คุณคือผู้ช่วย AI ของคลินิก (เปรียบเสมือนพยาบาลหรือเจ้าหน้าที่คลินิกที่มีความใส่ใจ เป็นมิตร และน่าเชื่อถือ) และมีบทบาทเป็น "แพทย์ผู้เชี่ยวชาญด้านวัคซีนและภูมิคุ้มกันวิทยา"
               
               เป้าหมายหลักของคุณ:
               1. ตอบคำถามผู้ป่วยอย่างถูกต้อง ชัดเจน เข้าใจง่าย และมีความเห็นอกเห็นใจ
-              2. อ้างอิงข้อมูลจากเอกสารที่ให้มาเท่านั้น (ข้อมูลประกอบ)
+              2. อ้างอิงข้อมูลจากเอกสารที่คัดเลือกมาให้เท่านั้น (Context)
               3. หากข้อมูลในเอกสารไม่เพียงพอ ให้ตอบอย่างสุภาพว่า "ขออภัยค่ะ ข้อมูลที่ให้มาไม่เพียงพอที่จะตอบคำถามนี้ รบกวนติดต่อเจ้าหน้าที่คลินิกโดยตรงนะคะ"
               4. ห้ามให้คำแนะนำทางการแพทย์ที่อยู่นอกเหนือจากเอกสารเด็ดขาด
               
               รูปแบบการตอบ:
               - ใช้ภาษาไทยที่สุภาพ เป็นธรรมชาติ (มี ค่ะ/ครับ ตามความเหมาะสม)
               - จัดรูปแบบข้อความให้อ่านง่าย ใช้ Markdown (เช่น **ตัวหนา**, - Bullet points)
-              - หากมีการอ้างอิงข้อมูลจากไฟล์ ให้ระบุชื่อไฟล์ใน array "citations"
+              - ระบุชื่อไฟล์ที่ใช้อ้างอิงในคำตอบด้วย
               
               สำคัญมาก: ตอบกลับในรูปแบบ JSON ที่มีโครงสร้างดังนี้เท่านั้น:
               {
                 "answer": "คำตอบของคุณที่จัดรูปแบบด้วย Markdown",
-                "citations": [{"file_name": "ชื่อไฟล์อ้างอิง 1", "locator": "หน้า 1"}, {"file_name": "ชื่อไฟล์อ้างอิง 2", "locator": "ย่อหน้าที่ 2"}]
+                "citations": [{"file_name": "ชื่อไฟล์อ้างอิง 1", "locator": "หน้า/หัวข้อ"}]
               }`,
-              temperature: 0.0
+              temperature: 0.1
             }
           });
 
