@@ -374,7 +374,7 @@ const AdminPanel = ({ files, setFiles, categories, setCategories }: AdminPanelPr
           </div>
           <div>
             <h3 className="text-sm font-bold text-blue-900">เพิ่มประสิทธิภาพการค้นหา</h3>
-            <p className="text-xs text-blue-700">ปรับปรุงไฟล์เก่าให้รองรับระบบค้นหาอัจฉริยะ (Semantic Search)</p>
+            <p className="text-xs text-blue-700">ปรับปรุงไฟล์เก่า (PDF, รูปภาพ) ให้รองรับระบบค้นหาอัจฉริยะ (Semantic Search)</p>
           </div>
         </div>
         <button 
