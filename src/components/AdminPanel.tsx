@@ -331,10 +331,65 @@ const AdminPanel = ({ files, setFiles, categories, setCategories }: AdminPanelPr
     });
   };
 
+  const handleOptimizeFiles = async () => {
+    setIsUploading(true);
+    try {
+      const response = await fetch('/api/admin/optimize-files', {
+        method: 'POST',
+      });
+      const data = await response.json();
+      if (response.ok) {
+        setModal({ 
+          isOpen: true, 
+          title: 'ปรับปรุงไฟล์สำเร็จ', 
+          message: `ระบบได้ทำการสร้าง Embeddings ให้กับไฟล์เก่าเรียบร้อยแล้ว (${data.count} ไฟล์) ตอนนี้ AI จะสามารถค้นหาข้อมูลได้แม่นยำขึ้นครับ`, 
+          type: 'alert', 
+          onConfirm: null 
+        });
+      } else {
+        throw new Error(data.error || 'Optimization failed');
+      }
+    } catch (error: any) {
+      setModal({ 
+        isOpen: true, 
+        title: 'เกิดข้อผิดพลาด', 
+        message: 'ไม่สามารถปรับปรุงไฟล์ได้: ' + error.message, 
+        type: 'alert', 
+        onConfirm: null 
+      });
+    } finally {
+      setIsUploading(false);
+    }
+  };
+
   const visibleFiles = files.slice(0, visibleCount);
 
   return (
     <div className="flex-1 overflow-y-auto p-4 sm:p-6 bg-gray-50 flex flex-col space-y-6 relative">
+      {/* Optimization Banner for old files */}
+      <div className="bg-blue-50 border border-blue-200 rounded-xl p-4 flex flex-col sm:flex-row items-center justify-between space-y-3 sm:space-y-0">
+        <div className="flex items-center">
+          <div className="bg-blue-100 p-2 rounded-full mr-3 text-blue-600">
+            <Activity size={20} />
+          </div>
+          <div>
+            <h3 className="text-sm font-bold text-blue-900">เพิ่มประสิทธิภาพการค้นหา</h3>
+            <p className="text-xs text-blue-700">ปรับปรุงไฟล์เก่าให้รองรับระบบค้นหาอัจฉริยะ (Semantic Search)</p>
+          </div>
+        </div>
+        <button 
+          onClick={handleOptimizeFiles}
+          disabled={isUploading || files.length === 0}
+          className={`px-4 py-2 rounded-lg text-sm font-medium transition-all ${
+            isUploading || files.length === 0
+              ? 'bg-gray-200 text-gray-400 cursor-not-allowed'
+              : 'bg-blue-600 text-white hover:bg-blue-700 shadow-sm'
+          }`}
+        >
+          {isUploading ? 'กำลังปรับปรุง...' : 'Optimize Old Files'}
+        </button>
+      </div>
+
       {/* Stats & Dashboard Summary */}
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 shrink-0">
         <div className="bg-white p-4 rounded-xl shadow-sm border border-gray-100 flex items-center">

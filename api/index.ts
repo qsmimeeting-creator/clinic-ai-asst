@@ -164,16 +164,39 @@ app.post("/api/upload", async (req, res) => {
       addRandomSuffix: true
     }) : await mockPut(name, buffer, { contentType: mimeType });
 
+    let finalContent = content;
+    // If content is missing (e.g. PDF uploaded from client without extraction)
+    if (!finalContent && mimeType === 'application/pdf' && inlineData) {
+      try {
+        const envKeys = (process.env.GEMINI_API_KEY || "").split(',').map(k => k.trim()).filter(k => k !== "");
+        if (envKeys.length > 0) {
+          const ai = getAI(envKeys[0]);
+          const result = await ai.models.generateContent({
+            model: 'gemini-3.1-flash-lite-preview',
+            contents: {
+              parts: [
+                { inlineData: { data: inlineData, mimeType } },
+                { text: "Extract all text from this document accurately. Output only the text content." }
+              ]
+            }
+          });
+          finalContent = result.text || '';
+        }
+      } catch (e) {
+        console.error('Failed to extract text from PDF via AI:', e);
+      }
+    }
+
     // 1.5 Generate Embedding for the content (Phase 2: Ingestion)
     let embedding = null;
-    if (content && content.length > 10) {
+    if (finalContent && finalContent.length > 10) {
       try {
         const envKeys = (process.env.GEMINI_API_KEY || "").split(',').map(k => k.trim()).filter(k => k !== "");
         if (envKeys.length > 0) {
           const ai = getAI(envKeys[0]);
           const result = await ai.models.embedContent({
             model: 'gemini-embedding-2-preview',
-            contents: [content.substring(0, 10000)], // Limit for embedding
+            contents: [finalContent.substring(0, 10000)], // Limit for embedding
           });
           if (result.embeddings && result.embeddings.length > 0) {
             embedding = result.embeddings[0].values;
@@ -195,7 +218,7 @@ app.post("/api/upload", async (req, res) => {
       size,
       url: blob.url,
       mimeType,
-      content: content || null,
+      content: finalContent || null,
       embedding: embedding,
       inlineData: inlineData.length < 1000000 ? inlineData : null
     };
@@ -312,6 +335,74 @@ const chunkText = (text: string, maxChunkSize: number = 4000) => {
   return chunks;
 };
 
+// Optimize all files (generate missing embeddings)
+app.post("/api/admin/optimize-files", async (req, res) => {
+  try {
+    const fileIds: string[] = await kv.get("clinic_files_ids") || [];
+    if (fileIds.length === 0) return res.json({ message: "No files to optimize", count: 0 });
+
+    const envKeys = (process.env.GEMINI_API_KEY || "").split(',').map(k => k.trim()).filter(k => k !== "");
+    if (envKeys.length === 0) return res.status(500).json({ error: "Missing API Key" });
+    
+    const ai = new GoogleGenAI({ apiKey: envKeys[0] });
+    let optimizedCount = 0;
+
+    for (const id of fileIds) {
+      const file: any = await kv.get(`clinic_file:${id}`);
+      if (!file) continue;
+
+      let updated = false;
+      
+      // Extract content if missing (especially for PDFs)
+      if (!file.content && file.mimeType === 'application/pdf' && file.inlineData) {
+        try {
+          const result = await ai.models.generateContent({
+            model: 'gemini-3.1-flash-lite-preview',
+            contents: {
+              parts: [
+                { inlineData: { data: file.inlineData, mimeType: file.mimeType } },
+                { text: "Extract all text from this document accurately. Output only the text content." }
+              ]
+            }
+          });
+          if (result.text) {
+            file.content = result.text;
+            updated = true;
+          }
+        } catch (e) {
+          console.error(`Text extraction failed for ${file.name}:`, e);
+        }
+      }
+      
+      // Generate embedding if missing
+      if (!file.embedding && file.content && file.content.length > 10) {
+        try {
+          const result = await ai.models.embedContent({
+            model: 'gemini-embedding-2-preview',
+            contents: [file.content.substring(0, 10000)],
+          });
+          if (result.embeddings && result.embeddings.length > 0) {
+            file.embedding = result.embeddings[0].values;
+            updated = true;
+          }
+        } catch (e) {
+          console.error(`Embedding failed for ${file.name}:`, e);
+        }
+      }
+
+      if (updated) {
+        await kv.set(`clinic_file:${id}`, file);
+        optimizedCount++;
+      }
+    }
+
+    res.json({ message: `Optimized ${optimizedCount} files`, count: optimizedCount });
+  } catch (error: any) {
+    console.error("Optimize Error:", error);
+    res.status(500).json({ error: "Optimize Error", message: error.message });
+  }
+});
+
 // Gemini Chat API (Server-side for security)
 app.post("/api/chat", async (req, res) => {
   try {
@@ -366,8 +457,23 @@ app.post("/api/chat", async (req, res) => {
       } else {
         // Fallback to simple keyword match if embedding fails
         const q = query.toLowerCase();
-        if (fullFile.name.toLowerCase().includes(q)) score += 0.5;
-        if (fullFile.content && fullFile.content.toLowerCase().includes(q)) score += 0.3;
+        const keywords = q.split(/\s+/).filter(k => k.length > 1);
+        
+        // Check name
+        const fileName = fullFile.name.toLowerCase();
+        keywords.forEach(kw => {
+          if (fileName.includes(kw)) score += 0.2;
+        });
+        if (fileName.includes(q)) score += 0.5;
+
+        // Check content
+        if (fullFile.content) {
+          const content = fullFile.content.toLowerCase();
+          keywords.forEach(kw => {
+            if (content.includes(kw)) score += 0.1;
+          });
+          if (content.includes(q)) score += 0.3;
+        }
       }
       return { ...fullFile, score };
     }));
