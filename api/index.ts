@@ -98,11 +98,15 @@ app.get("/api/data", async (req, res) => {
       const filePromises = fileIds.map(id => kv.get(`clinic_file:${id}`));
       const results = await Promise.all(filePromises);
       files.push(...results.filter(f => f !== null).map((f: any) => {
-        const { inlineData, content, ...rest } = f;
+        const { inlineData, content, embedding, ...rest } = f;
         if (rest.url && rest.url.startsWith('data:')) {
           rest.url = null; // Strip data URI to save bandwidth, frontend will use /api/files/:id/download
         }
-        return rest;
+        return {
+          ...rest,
+          hasContent: !!content,
+          hasEmbedding: !!embedding
+        };
       }));
     }
 
@@ -165,16 +169,17 @@ app.post("/api/upload", async (req, res) => {
     }) : await mockPut(name, buffer, { contentType: mimeType });
 
     let finalContent = content;
-    // If content is missing (e.g. PDF or Image uploaded from client without extraction)
-    const isImage = mimeType && mimeType.startsWith('image/');
-    if (!finalContent && (mimeType === 'application/pdf' || isImage) && inlineData) {
+    // If content is missing (e.g. PDF, Image, Audio, Video uploaded from client without extraction)
+    const isMedia = mimeType && (mimeType.startsWith('image/') || mimeType.startsWith('audio/') || mimeType.startsWith('video/'));
+    if (!finalContent && (mimeType === 'application/pdf' || isMedia) && inlineData) {
       try {
         const envKeys = (process.env.GEMINI_API_KEY || "").split(',').map(k => k.trim()).filter(k => k !== "");
         if (envKeys.length > 0) {
           const ai = getAI(envKeys[0]);
-          const prompt = mimeType === 'application/pdf' 
-            ? "Extract all text from this document accurately. Output only the text content."
-            : "Extract all text from this image accurately. If it's a document or contains text, transcribe it. Output only the text content.";
+          let prompt = "Extract all text from this document accurately. Output only the text content.";
+          if (mimeType.startsWith('image/')) prompt = "Extract all text from this image accurately. If it's a document or contains text, transcribe it. Output only the text content.";
+          if (mimeType.startsWith('audio/')) prompt = "Transcribe this audio accurately. Output only the transcription.";
+          if (mimeType.startsWith('video/')) prompt = "Transcribe the audio in this video and describe any important text shown on screen. Output only the text.";
           
           const result = await ai.models.generateContent({
             model: 'gemini-3.1-flash-lite-preview',
@@ -358,26 +363,40 @@ app.post("/api/admin/optimize-files", async (req, res) => {
 
       let updated = false;
       
-      // Extract content if missing (especially for PDFs and Images)
-      const isImage = file.mimeType && file.mimeType.startsWith('image/');
-      if (!file.content && (file.mimeType === 'application/pdf' || isImage) && file.inlineData) {
+      // Extract content if missing (especially for PDFs and Media)
+      const isMedia = file.mimeType && (file.mimeType.startsWith('image/') || file.mimeType.startsWith('audio/') || file.mimeType.startsWith('video/'));
+      if (!file.content && (file.mimeType === 'application/pdf' || isMedia)) {
         try {
-          const prompt = file.mimeType === 'application/pdf'
-            ? "Extract all text from this document accurately. Output only the text content."
-            : "Extract all text from this image accurately. If it's a document or contains text, transcribe it. Output only the text content.";
-
-          const result = await ai.models.generateContent({
-            model: 'gemini-3.1-flash-lite-preview',
-            contents: {
-              parts: [
-                { inlineData: { data: file.inlineData, mimeType: file.mimeType } },
-                { text: prompt }
-              ]
+          let fileData = file.inlineData;
+          if (!fileData && file.url) {
+            if (file.url.startsWith('data:')) {
+              fileData = file.url.split(',')[1];
+            } else {
+              const resp = await fetch(file.url);
+              const arrayBuffer = await resp.arrayBuffer();
+              fileData = Buffer.from(arrayBuffer).toString('base64');
             }
-          });
-          if (result.text) {
-            file.content = result.text;
-            updated = true;
+          }
+
+          if (fileData) {
+            let prompt = "Extract all text from this document accurately. Output only the text content.";
+            if (file.mimeType.startsWith('image/')) prompt = "Extract all text from this image accurately. If it's a document or contains text, transcribe it. Output only the text content.";
+            if (file.mimeType.startsWith('audio/')) prompt = "Transcribe this audio accurately. Output only the transcription.";
+            if (file.mimeType.startsWith('video/')) prompt = "Transcribe the audio in this video and describe any important text shown on screen. Output only the text.";
+
+            const result = await ai.models.generateContent({
+              model: 'gemini-3.1-flash-lite-preview',
+              contents: {
+                parts: [
+                  { inlineData: { data: fileData, mimeType: file.mimeType } },
+                  { text: prompt }
+                ]
+              }
+            });
+            if (result.text) {
+              file.content = result.text;
+              updated = true;
+            }
           }
         } catch (e) {
           console.error(`Text extraction failed for ${file.name}:`, e);

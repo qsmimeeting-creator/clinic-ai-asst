@@ -112,7 +112,7 @@ const AdminPanel = ({ files, setFiles, categories, setCategories }: AdminPanelPr
           mimeType: file.type || 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
         };
       } catch (e) {
-        return { type: 'text', content: `[Error reading Word file: ${file.name}]`, inlineData: base64Data, mimeType: file.type };
+        return { type: 'text', content: '', inlineData: base64Data, mimeType: file.type || 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' };
       }
     }
     else if (['xls', 'xlsx'].includes(ext)) {
@@ -130,7 +130,7 @@ const AdminPanel = ({ files, setFiles, categories, setCategories }: AdminPanelPr
           mimeType: file.type || 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
         };
       } catch (e) {
-        return { type: 'text', content: `[Error reading Excel file: ${file.name}]`, inlineData: base64Data, mimeType: file.type };
+        return { type: 'text', content: '', inlineData: base64Data, mimeType: file.type || 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' };
       }
     }
     else {
@@ -331,6 +331,43 @@ const AdminPanel = ({ files, setFiles, categories, setCategories }: AdminPanelPr
     });
   };
 
+  const handleOptimizeFiles = async () => {
+    setIsUploading(true);
+    try {
+      const response = await fetch('/api/admin/optimize-files', {
+        method: 'POST',
+      });
+      const data = await response.json();
+      if (response.ok) {
+        setModal({ 
+          isOpen: true, 
+          title: 'ซ่อมแซมไฟล์สำเร็จ', 
+          message: `ระบบได้ทำการอ่านเนื้อหาและสร้างดัชนีให้กับไฟล์เก่าเรียบร้อยแล้ว (${data.count} ไฟล์) ตอนนี้ AI จะสามารถค้นหาข้อมูลได้แม่นยำขึ้นครับ`, 
+          type: 'alert', 
+          onConfirm: null 
+        });
+        // Refresh files list to get updated content/embeddings
+        const dataRes = await fetch('/api/data');
+        if (dataRes.ok) {
+          const data = await dataRes.json();
+          setFiles(data.files);
+        }
+      } else {
+        throw new Error(data.error || 'Optimization failed');
+      }
+    } catch (error: any) {
+      setModal({ 
+        isOpen: true, 
+        title: 'เกิดข้อผิดพลาด', 
+        message: 'ไม่สามารถซ่อมแซมไฟล์ได้: ' + error.message, 
+        type: 'alert', 
+        onConfirm: null 
+      });
+    } finally {
+      setIsUploading(false);
+    }
+  };
+
   const visibleFiles = files.slice(0, visibleCount);
 
   return (
@@ -351,12 +388,26 @@ const AdminPanel = ({ files, setFiles, categories, setCategories }: AdminPanelPr
             <p className="text-xl font-bold text-[#333333]">{files.filter(f => f.status === 'active').length}</p>
           </div>
         </div>
-        <div className="bg-white p-4 rounded-xl shadow-sm border border-gray-100 flex items-center">
-          <div className="bg-purple-100 p-3 rounded-full mr-4 text-purple-600"><Activity size={20} /></div>
-          <div>
-            <p className="text-xs text-gray-500 font-medium">สถานะ Vector DB</p>
-            <p className="text-xl font-bold text-green-600 text-sm mt-1">Ready (Indexed)</p>
+        <div className="bg-white p-4 rounded-xl shadow-sm border border-gray-100 flex items-center justify-between">
+          <div className="flex items-center">
+            <div className="bg-purple-100 p-3 rounded-full mr-4 text-purple-600"><Activity size={20} /></div>
+            <div>
+              <p className="text-xs text-gray-500 font-medium">สถานะ Vector DB</p>
+              <p className="text-xl font-bold text-green-600 text-sm mt-1">Ready (Indexed)</p>
+            </div>
           </div>
+          <button 
+            onClick={handleOptimizeFiles}
+            disabled={isUploading || files.length === 0}
+            className={`text-xs px-3 py-1.5 rounded-md font-medium transition-colors ${
+              isUploading || files.length === 0
+                ? 'bg-gray-100 text-gray-400 cursor-not-allowed'
+                : 'bg-purple-50 text-purple-700 hover:bg-purple-100 border border-purple-200'
+            }`}
+            title="ซ่อมแซมไฟล์เก่าที่ AI อ่านไม่ได้"
+          >
+            {isUploading ? 'กำลังซ่อมแซม...' : 'ซ่อมแซมไฟล์'}
+          </button>
         </div>
       </div>
 
@@ -497,6 +548,18 @@ const AdminPanel = ({ files, setFiles, categories, setCategories }: AdminPanelPr
                               <span className="text-xs text-gray-500 flex items-center"><Tag size={12} className="mr-1" /> {getCategoryName(file.category)}</span>
                               <span className="text-xs text-gray-500 flex items-center"><Activity size={12} className="mr-1" /> {file.size}</span>
                               <span className="text-xs text-gray-500">{file.date}</span>
+                              <div className="flex gap-1 ml-2">
+                                {file.hasContent ? (
+                                  <span className="px-1.5 py-0.5 bg-green-100 text-green-700 text-[10px] rounded font-medium" title="มีเนื้อหา">TXT</span>
+                                ) : (
+                                  <span className="px-1.5 py-0.5 bg-red-100 text-red-700 text-[10px] rounded font-medium" title="ไม่มีเนื้อหา (AI อาจจะอ่านไม่ได้)">NO TXT</span>
+                                )}
+                                {file.hasEmbedding ? (
+                                  <span className="px-1.5 py-0.5 bg-blue-100 text-blue-700 text-[10px] rounded font-medium" title="มีดัชนีค้นหา">EMB</span>
+                                ) : (
+                                  <span className="px-1.5 py-0.5 bg-orange-100 text-orange-700 text-[10px] rounded font-medium" title="ไม่มีดัชนีค้นหา (ค้นหาไม่แม่นยำ)">NO EMB</span>
+                                )}
+                              </div>
                             </div>
                           </div>
                         </div>
