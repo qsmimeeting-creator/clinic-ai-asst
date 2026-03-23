@@ -25,7 +25,14 @@ function cosineSimilarity(vecA: number[], vecB: number[]) {
 }
 
 // Initialize KV with fallback for different environment variable names
-const hasKVConfig = !!(process.env.KV_REST_API_URL && process.env.KV_REST_API_TOKEN);
+const kvUrl = process.env.KV_REST_API_URL || process.env.KV_URL || "";
+const kvToken = process.env.KV_REST_API_TOKEN || "";
+
+if (kvUrl.startsWith('redis')) {
+  console.warn("[KV Warning] KV_REST_API_URL appears to be a redis:// URL. @vercel/kv createClient expects an https:// REST API URL. This might cause connection issues.");
+}
+
+const hasKVConfig = !!(kvUrl && (kvToken || kvUrl.includes("@")));
 const hasBlobConfig = !!process.env.BLOB_READ_WRITE_TOKEN;
 
 // In-memory fallback for development ONLY
@@ -38,15 +45,15 @@ const memoryStore: Record<string, any> = {
 };
 
 const kv = hasKVConfig ? createClient({
-  url: process.env.KV_REST_API_URL || "",
-  token: process.env.KV_REST_API_TOKEN || "",
+  url: kvUrl,
+  token: kvToken,
 }) : {
   get: async (key: string) => {
-    console.warn(`[KV Warning] Using memory fallback for key: ${key}. Data will be lost on restart.`);
+    console.warn(`[KV Warning] Using memory fallback for key: ${key}`);
     return memoryStore[key] || null;
   },
   set: async (key: string, value: any) => {
-    console.warn(`[KV Warning] Saving to memory fallback for key: ${key}. Data will be lost on restart.`);
+    console.warn(`[KV Warning] Saving to memory fallback for key: ${key}`);
     memoryStore[key] = value; 
     return "OK"; 
   },
@@ -118,13 +125,17 @@ app.get("/api/data", async (req, res) => {
     });
   }
   try {
-    const fileIds: string[] = await kv.get("clinic_files_ids") || [];
+    const fileIdsRaw = await kv.get("clinic_files_ids");
+    console.log(`[KV] Fetched file IDs: ${JSON.stringify(fileIdsRaw)}`);
+    const fileIds: string[] = Array.isArray(fileIdsRaw) ? fileIdsRaw : [];
     const files = [];
     
     // Fetch each file metadata in parallel
     if (fileIds.length > 0) {
       const keys = fileIds.map(id => `clinic_file:${id}`);
+      console.log(`[KV] Fetching ${keys.length} file metadata keys`);
       const results = await kv.mget(...keys);
+      
       files.push(...results.filter(f => f !== null).map((f: any) => {
         const { inlineData, content, embedding, ...rest } = f;
         if (rest.url && rest.url.startsWith('data:')) {
@@ -132,10 +143,11 @@ app.get("/api/data", async (req, res) => {
         }
         return {
           ...rest,
-          hasContent: !!content,
-          hasEmbedding: !!embedding
+          hasContent: !!content && content.length > 0,
+          hasEmbedding: !!embedding && Array.isArray(embedding) && embedding.length > 0
         };
       }));
+      console.log(`[KV] Successfully retrieved ${files.length} files`);
     }
 
     let categories = await kv.get("clinic_categories") || [];
@@ -196,21 +208,25 @@ app.post("/api/upload", async (req, res) => {
 
     // 1. Upload to Vercel Blob
     const buffer = Buffer.from(inlineData, 'base64');
+    console.log(`Uploading file: ${name}, Size: ${buffer.length} bytes`);
     
     // Use real put if config exists, otherwise use mock
     const blob = hasBlobConfig ? await put(name, buffer, {
       contentType: mimeType,
       access: 'public',
-      // @ts-ignore - Some versions of the SDK might not have this in types but the API supports it
-      contentLength: buffer.length,
       addRandomSuffix: true
     }) : await mockPut(name, buffer, { contentType: mimeType });
+
+    console.log(`Blob Upload Success: ${blob.url}`);
 
     let finalContent = content;
     // If content is missing (e.g. PDF, Image, Audio, Video uploaded from client without extraction)
     const isMedia = mimeType && (mimeType.startsWith('image/') || mimeType.startsWith('audio/') || mimeType.startsWith('video/'));
-    if (!finalContent && (mimeType === 'application/pdf' || isMedia) && inlineData) {
+    const isPDF = mimeType === 'application/pdf';
+    
+    if (!finalContent && (isPDF || isMedia) && inlineData) {
       try {
+        console.log(`[AI] Extracting text for: ${name} (${mimeType})`);
         const envKeys = (process.env.GEMINI_API_KEY || "").split(',').map(k => k.trim()).filter(k => k !== "");
         if (envKeys.length > 0) {
           const ai = getAI(envKeys[0]);
@@ -220,7 +236,7 @@ app.post("/api/upload", async (req, res) => {
           if (mimeType.startsWith('video/')) prompt = "Transcribe the audio in this video and describe any important text shown on screen. Output only the text.";
           
           const result = await ai.models.generateContent({
-            model: 'gemini-3.1-flash-lite-preview',
+            model: 'gemini-3-flash-preview',
             contents: {
               parts: [
                 { inlineData: { data: inlineData, mimeType } },
@@ -229,29 +245,34 @@ app.post("/api/upload", async (req, res) => {
             }
           });
           finalContent = result.text || '';
+          console.log(`[AI] Extraction Success for ${name}. Length: ${finalContent.length}`);
+        } else {
+          console.warn("[AI] Missing GEMINI_API_KEY for text extraction");
         }
-      } catch (e) {
-        console.error('Failed to extract text via AI:', e);
+      } catch (e: any) {
+        console.error(`[AI] Extraction failed for ${name}:`, e.message);
       }
     }
 
-    // 1.5 Generate Embedding for the content (Phase 2: Ingestion)
+    // 1.5 Generate Embedding for the content
     let embedding = null;
-    if (finalContent && finalContent.length > 10) {
+    if (finalContent && finalContent.length > 5) {
       try {
+        console.log(`Generating embedding for: ${name}`);
         const envKeys = (process.env.GEMINI_API_KEY || "").split(',').map(k => k.trim()).filter(k => k !== "");
         if (envKeys.length > 0) {
           const ai = getAI(envKeys[0]);
           const result = await ai.models.embedContent({
             model: 'gemini-embedding-2-preview',
-            contents: [finalContent.substring(0, 10000)], // Limit for embedding
+            contents: [finalContent.substring(0, 10000)],
           });
           if (result.embeddings && result.embeddings.length > 0) {
             embedding = result.embeddings[0].values;
+            console.log(`Embedding Success for: ${name}`);
           }
         }
-      } catch (e) {
-        console.error("Embedding generation failed:", e);
+      } catch (e: any) {
+        console.error("Embedding generation failed:", e.message);
       }
     }
 
@@ -268,16 +289,20 @@ app.post("/api/upload", async (req, res) => {
       mimeType,
       content: finalContent || null,
       embedding: embedding,
-      inlineData: inlineData.length < 1000000 ? inlineData : null
+      // REMOVED inlineData from KV to stay under 1MB limit
     };
     
     await kv.set(`clinic_file:${fileId}`, newFile);
     
-    const fileIds: string[] = await kv.get("clinic_files_ids") || [];
+    let fileIdsRaw = await kv.get("clinic_files_ids");
+    let fileIds: string[] = Array.isArray(fileIdsRaw) ? fileIdsRaw : [];
+    
     fileIds.unshift(fileId);
+    fileIds = [...new Set(fileIds)].slice(0, 500);
+    
     await kv.set("clinic_files_ids", fileIds);
     
-    const { inlineData: _, content: __, ...responseFile } = newFile;
+    const { content: _, ...responseFile } = newFile;
     if (responseFile.url && responseFile.url.startsWith('data:')) {
       responseFile.url = null as any; // Strip data URI
     }
@@ -403,19 +428,23 @@ app.post("/api/admin/optimize-files", async (req, res) => {
       
       // Extract content if missing (especially for PDFs and Media)
       const isMedia = file.mimeType && (file.mimeType.startsWith('image/') || file.mimeType.startsWith('audio/') || file.mimeType.startsWith('video/'));
-      if (!file.content && (file.mimeType === 'application/pdf' || isMedia)) {
+      const isPDF = file.mimeType === 'application/pdf';
+      
+      if (!file.content && (isPDF || isMedia)) {
         try {
+          console.log(`[Optimize] Attempting extraction for ${file.name}`);
           let fileData = file.inlineData;
           if (!fileData && file.url) {
             if (file.url.startsWith('data:')) {
               fileData = file.url.split(',')[1];
             } else {
+              console.log(`[Optimize] Fetching file from URL: ${file.url}`);
               const resp = await fetch(file.url);
               const arrayBuffer = await resp.arrayBuffer();
               fileData = Buffer.from(arrayBuffer).toString('base64');
             }
           }
-
+          
           if (fileData) {
             let prompt = "Extract all text from this document accurately. Output only the text content.";
             if (file.mimeType.startsWith('image/')) prompt = "Extract all text from this image accurately. If it's a document or contains text, transcribe it. Output only the text content.";
@@ -423,7 +452,7 @@ app.post("/api/admin/optimize-files", async (req, res) => {
             if (file.mimeType.startsWith('video/')) prompt = "Transcribe the audio in this video and describe any important text shown on screen. Output only the text.";
 
             const result = await ai.models.generateContent({
-              model: 'gemini-3.1-flash-lite-preview',
+              model: 'gemini-3-flash-preview',
               contents: {
                 parts: [
                   { inlineData: { data: fileData, mimeType: file.mimeType } },
@@ -434,10 +463,11 @@ app.post("/api/admin/optimize-files", async (req, res) => {
             if (result.text) {
               file.content = result.text;
               updated = true;
+              console.log(`[Optimize] Extraction success for ${file.name}`);
             }
           }
-        } catch (e) {
-          console.error(`Text extraction failed for ${file.name}:`, e);
+        } catch (e: any) {
+          console.error(`[Optimize] Text extraction failed for ${file.name}:`, e.message);
         }
       }
       
@@ -458,6 +488,8 @@ app.post("/api/admin/optimize-files", async (req, res) => {
       }
 
       if (updated) {
+        // Ensure we don't save large inlineData back to KV
+        if (file.inlineData) delete file.inlineData;
         await kv.set(`clinic_file:${id}`, file);
         optimizedCount++;
       }

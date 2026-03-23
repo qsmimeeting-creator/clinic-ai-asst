@@ -7,6 +7,10 @@ import {
 } from 'lucide-react';
 import mammoth from 'mammoth';
 import * as XLSX from 'xlsx';
+import * as pdfjsLib from 'pdfjs-dist';
+
+// Set up PDF.js worker
+pdfjsLib.GlobalWorkerOptions.workerSrc = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjsLib.version}/pdf.worker.min.mjs`;
 
 interface AdminPanelProps {
   files: any[];
@@ -107,6 +111,32 @@ const AdminPanel = ({ files, setFiles, categories, setCategories, storageStatus 
       const content = await file.text();
       return { type: 'text', content, inlineData: base64Data, mimeType: 'text/plain' };
     } 
+    else if (ext === 'pdf') {
+      try {
+        console.log("Extracting text from PDF client-side...");
+        const loadingTask = pdfjsLib.getDocument({ data: arrayBuffer });
+        const pdf = await loadingTask.promise;
+        let fullText = "";
+        
+        for (let i = 1; i <= pdf.numPages; i++) {
+          const page = await pdf.getPage(i);
+          const textContent = await page.getTextContent();
+          const pageText = textContent.items.map((item: any) => item.str).join(" ");
+          fullText += pageText + "\n";
+        }
+        
+        console.log(`PDF Extraction Success. Length: ${fullText.length}`);
+        return { 
+          type: 'text', 
+          content: fullText, 
+          inlineData: base64Data, 
+          mimeType: 'application/pdf' 
+        };
+      } catch (e: any) {
+        console.error("PDF Extraction failed client-side:", e.message);
+        return { type: 'media', mimeType: 'application/pdf', inlineData: base64Data };
+      }
+    }
     else if (['doc', 'docx'].includes(ext)) {
       try {
         const result = await mammoth.extractRawText({ arrayBuffer });
