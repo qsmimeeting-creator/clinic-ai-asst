@@ -83,9 +83,18 @@ const checkEnv = () => {
   return [];
 };
 
+// In-memory cache for metadata to speed up /api/data
+let metadataCache: { data: any, timestamp: number } | null = null;
+const METADATA_CACHE_TTL = 30000; // 30 seconds
+
 // Fetch all data (files and categories)
 app.get("/api/data", async (req, res) => {
   try {
+    // Check cache
+    if (metadataCache && (Date.now() - metadataCache.timestamp < METADATA_CACHE_TTL)) {
+      return res.json(metadataCache.data);
+    }
+
     const fileIds: string[] = await kv.get("clinic_files_ids") || [];
     const files = [];
     
@@ -93,24 +102,27 @@ app.get("/api/data", async (req, res) => {
     if (fileIds.length > 0) {
       // Limit to last 100 files for performance if the list is huge
       const recentIds = fileIds.slice(0, 100);
-      let results: any[] = [];
       
-      // Fetch in smaller batches to avoid hitting the 10MB request/response limit
-      const batchSize = 10;
+      // Fetch in batches but in PARALLEL to speed up loading
+      const batchSize = 20; // Increased batch size
+      const batchPromises = [];
+      
       for (let i = 0; i < recentIds.length; i += batchSize) {
         const batch = recentIds.slice(i, i + batchSize);
-        const kvAny = kv as any;
-        let batchResults = [];
-        
-        if (typeof kvAny.mget === 'function') {
-          const keys = batch.map(id => `clinic_file:${id}`);
-          batchResults = await kvAny.mget(...keys);
-        } else {
-          const filePromises = batch.map(id => kv.get(`clinic_file:${id}`));
-          batchResults = await Promise.all(filePromises);
-        }
-        results.push(...batchResults);
+        batchPromises.push((async () => {
+          const kvAny = kv as any;
+          if (typeof kvAny.mget === 'function') {
+            const keys = batch.map(id => `clinic_file:${id}`);
+            return await kvAny.mget(...keys);
+          } else {
+            const filePromises = batch.map(id => kv.get(`clinic_file:${id}`));
+            return await Promise.all(filePromises);
+          }
+        })());
       }
+      
+      const batchResults = await Promise.all(batchPromises);
+      const results = batchResults.flat();
       
       files.push(...results.filter(f => f !== null).map((f: any) => {
         // Strip large fields to save bandwidth and prevent timeouts
@@ -123,7 +135,12 @@ app.get("/api/data", async (req, res) => {
     }
 
     const categories = await kv.get("clinic_categories") || [];
-    res.json({ files, categories, totalFiles: fileIds.length });
+    const responseData = { files, categories, totalFiles: fileIds.length };
+    
+    // Update cache
+    metadataCache = { data: responseData, timestamp: Date.now() };
+    
+    res.json(responseData);
   } catch (error: any) {
     console.error("KV Error:", error);
     res.status(500).json({ error: "KV Connection Error", message: error.message });
@@ -141,6 +158,7 @@ app.post("/api/categories", async (req, res) => {
       return res.status(400).json({ error: "Invalid categories format. Expected an array." });
     }
     await kv.set("clinic_categories", categories);
+    metadataCache = null; // Invalidate cache
     res.json({ success: true });
   } catch (error: any) {
     res.status(500).json({ error: "Failed to save categories", message: error.message });
@@ -227,6 +245,7 @@ app.post("/api/upload", async (req, res) => {
       await kv.set("clinic_files_ids", fileIds);
     }
     
+    metadataCache = null; // Invalidate cache
     res.json(fileMeta);
   } catch (error: any) {
     console.error("Upload Error:", error);
@@ -258,6 +277,7 @@ app.delete("/api/files/:id", async (req, res) => {
     const updatedFileIds = fileIds.filter(fid => fid !== id);
     await kv.set("clinic_files_ids", updatedFileIds);
     
+    metadataCache = null; // Invalidate cache
     res.json({ success: true });
   } catch (error) {
     res.status(500).json({ error: "Failed to delete file" });
@@ -279,6 +299,7 @@ app.post("/api/files/:id/status", async (req, res) => {
         fullData.status = file.status;
         await kv.set(`clinic_file_content:${id}`, fullData);
       }
+      metadataCache = null; // Invalidate cache
     }
     res.json({ success: true });
   } catch (error) {
@@ -440,6 +461,7 @@ app.post("/api/admin/optimize-files", async (req, res) => {
       if (optimizedCount >= 15) break;
     }
 
+    metadataCache = null; // Invalidate cache
     res.json({ message: `Optimized ${optimizedCount} files`, count: optimizedCount });
   } catch (error: any) {
     console.error("Optimize Error:", error);

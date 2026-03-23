@@ -30,16 +30,24 @@ export default function App() {
   const [files, setFiles] = useState([]);
   const [isLoading, setIsLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [showSlowLoadMessage, setShowSlowLoadMessage] = useState(false);
 
   const fetchData = useCallback(async () => {
     setIsLoading(true);
     setLoadError(null);
+    setShowSlowLoadMessage(false);
+    
+    const slowLoadTimer = setTimeout(() => {
+      setShowSlowLoadMessage(true);
+    }, 5000);
+
     try {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 30000); // Increased to 30s
 
       const response = await fetch('/api/data', { signal: controller.signal });
       clearTimeout(timeoutId);
+      clearTimeout(slowLoadTimer);
       
       const data = await response.json();
       
@@ -312,7 +320,14 @@ export default function App() {
       {isLoading ? (
         <div className="flex flex-col items-center justify-center space-y-4">
           <div className="w-12 h-12 border-4 border-[#B11226] border-t-transparent rounded-full animate-spin"></div>
-          <p className="text-gray-500 font-medium">กำลังเชื่อมต่อ Vercel Storage...</p>
+          <div className="text-center">
+            <p className="text-gray-500 font-medium">กำลังเชื่อมต่อ Vercel Storage...</p>
+            {showSlowLoadMessage && (
+              <p className="text-xs text-gray-400 mt-2 animate-pulse">
+                ดูเหมือนจะใช้เวลานานกว่าปกติ กำลังพยายามดึงข้อมูลแบบแบ่งกลุ่ม...
+              </p>
+            )}
+          </div>
         </div>
       ) : loadError ? (
         <div className="flex flex-col items-center justify-center space-y-4 p-6 bg-white rounded-xl shadow-lg max-w-sm text-center">
