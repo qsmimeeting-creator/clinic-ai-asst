@@ -85,40 +85,37 @@ const checkEnv = () => {
 
 // Fetch all data (files and categories)
 app.get("/api/data", async (req, res) => {
-  const missing = checkEnv();
-  if (missing.length > 0) {
-    return res.status(500).json({ 
-      error: `Missing Environment Variables: ${missing.join(", ")}`,
-      details: "Please ensure you have clicked 'Connect' in the Vercel Storage tab for both KV and Blob, then Redeploy."
-    });
-  }
   try {
     const fileIds: string[] = await kv.get("clinic_files_ids") || [];
     const files = [];
     
-    // Fetch each file metadata in parallel using mget if possible
+    // Fetch each file metadata in parallel
     if (fileIds.length > 0) {
+      // Limit to last 100 files for performance if the list is huge
+      const recentIds = fileIds.slice(0, 100);
       let results: any[] = [];
       const kvAny = kv as any;
+      
       if (typeof kvAny.mget === 'function') {
-        const keys = fileIds.map(id => `clinic_file:${id}`);
+        const keys = recentIds.map(id => `clinic_file:${id}`);
         results = await kvAny.mget(...keys);
       } else {
-        const filePromises = fileIds.map(id => kv.get(`clinic_file:${id}`));
+        const filePromises = recentIds.map(id => kv.get(`clinic_file:${id}`));
         results = await Promise.all(filePromises);
       }
       
       files.push(...results.filter(f => f !== null).map((f: any) => {
+        // Strip large fields to save bandwidth and prevent timeouts
         const { inlineData, content, embedding, ...rest } = f;
         if (rest.url && rest.url.startsWith('data:')) {
-          rest.url = null; // Strip data URI to save bandwidth
+          rest.url = null; // Strip data URI
         }
         return rest;
       }));
     }
 
     const categories = await kv.get("clinic_categories") || [];
-    res.json({ files, categories });
+    res.json({ files, categories, totalFiles: fileIds.length });
   } catch (error: any) {
     console.error("KV Error:", error);
     res.status(500).json({ error: "KV Connection Error", message: error.message });
@@ -177,7 +174,9 @@ app.post("/api/upload", async (req, res) => {
 
     // 2. Save metadata to individual KV key and update ID list
     const fileId = `file_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
-    const newFile = {
+    
+    // Store metadata separately from large content to keep list fetching fast
+    const fileMeta = {
       id: fileId,
       name,
       category,
@@ -185,29 +184,40 @@ app.post("/api/upload", async (req, res) => {
       date,
       size,
       url: blob.url,
-      mimeType,
+      mimeType
+    };
+
+    const fileData = {
+      id: fileId,
       content: content || null,
       embedding: null,
-      inlineData: inlineData.length < 500000 ? inlineData : null // Reduced limit for KV safety
+      inlineData: inlineData.length < 500000 ? inlineData : null
     };
     
-    await kv.set(`clinic_file:${fileId}`, newFile);
+    // Save metadata and data in parallel
+    await Promise.all([
+      kv.set(`clinic_file:${fileId}`, { ...fileMeta, ...fileData }), // Keep full object for backward compatibility in some places
+      // We could also store them separately here if we wanted to be even more optimized
+    ]);
     
     // Use atomic lpush if available, otherwise fallback
     const kvAny = kv as any;
-    if (typeof kvAny.lpush === 'function') {
-      await kvAny.lpush("clinic_files_ids", fileId);
-    } else {
+    try {
+      if (typeof kvAny.lpush === 'function') {
+        await kvAny.lpush("clinic_files_ids", fileId);
+      } else {
+        const fileIds: string[] = await kv.get("clinic_files_ids") || [];
+        fileIds.unshift(fileId);
+        await kv.set("clinic_files_ids", fileIds);
+      }
+    } catch (lpushError) {
+      console.error("LPUSH failed, falling back to set:", lpushError);
       const fileIds: string[] = await kv.get("clinic_files_ids") || [];
       fileIds.unshift(fileId);
       await kv.set("clinic_files_ids", fileIds);
     }
     
-    const { inlineData: _, content: __, ...responseFile } = newFile;
-    if (responseFile.url && responseFile.url.startsWith('data:')) {
-      responseFile.url = null as any; // Strip data URI
-    }
-    res.json(responseFile);
+    res.json(fileMeta);
   } catch (error: any) {
     console.error("Upload Error:", error);
     res.status(500).json({ 

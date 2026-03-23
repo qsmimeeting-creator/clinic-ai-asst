@@ -36,7 +36,7 @@ export default function App() {
     setLoadError(null);
     try {
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 15000); // 15s timeout
+      const timeoutId = setTimeout(() => controller.abort(), 30000); // Increased to 30s
 
       const response = await fetch('/api/data', { signal: controller.signal });
       clearTimeout(timeoutId);

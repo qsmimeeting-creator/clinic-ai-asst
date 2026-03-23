@@ -192,14 +192,14 @@ const AdminPanel = ({ files, setFiles, categories, setCategories }: AdminPanelPr
       return;
     }
 
-    const MAX_FILE_SIZE = 3 * 1024 * 1024; // 3MB
+    const MAX_FILE_SIZE = 2.5 * 1024 * 1024; // 2.5MB to stay safe with Vercel's 4.5MB payload limit
     const oversizedFiles = selectedFiles.filter(f => f.size > MAX_FILE_SIZE);
     
     if (oversizedFiles.length > 0) {
       setModal({ 
         isOpen: true, 
         title: 'ไฟล์ใหญ่เกินไป', 
-        message: `มีไฟล์จำนวน ${oversizedFiles.length} ไฟล์ที่มีขนาดเกิน 3MB กรุณาเลือกไฟล์ที่เล็กลงครับ`, 
+        message: `มีไฟล์จำนวน ${oversizedFiles.length} ไฟล์ที่มีขนาดเกิน 2.5MB กรุณาเลือกไฟล์ที่เล็กลงครับ`, 
         type: 'alert',
         onConfirm: null
       });
@@ -215,6 +215,10 @@ const AdminPanel = ({ files, setFiles, categories, setCategories }: AdminPanelPr
       for (let i = 0; i < selectedFiles.length; i++) {
         const file = selectedFiles[i];
         setUploadProgress({ current: i + 1, total: selectedFiles.length });
+        
+        // Add a small delay between multiple uploads to prevent overwhelming the server
+        if (i > 0) await new Promise(resolve => setTimeout(resolve, 500));
+        
         try {
           const processedData = await processUploadedFile(file);
           
