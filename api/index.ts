@@ -215,7 +215,7 @@ app.post("/api/upload", async (req, res) => {
           if (mimeType.startsWith('video/')) prompt = "Transcribe the audio in this video and describe any important text shown on screen. Output only the text.";
           
           const result = await ai.models.generateContent({
-            model: 'gemini-3.1-flash-lite-preview',
+            model: 'gemini-3-flash-preview',
             contents: {
               parts: [
                 { inlineData: { data: inlineData, mimeType } },
@@ -418,7 +418,7 @@ app.post("/api/admin/optimize-files", async (req, res) => {
             if (file.mimeType.startsWith('video/')) prompt = "Transcribe the audio in this video and describe any important text shown on screen. Output only the text.";
 
             const result = await ai.models.generateContent({
-              model: 'gemini-3.1-flash-lite-preview',
+              model: 'gemini-3-flash-preview',
               contents: {
                 parts: [
                   { inlineData: { data: fileData, mimeType: file.mimeType } },
@@ -609,8 +609,8 @@ app.post("/api/chat", async (req, res) => {
     let headersSent = false;
 
     const modelsToTry = [
-      "gemini-3.1-flash-lite-preview",
       "gemini-3-flash-preview",
+      "gemini-3.1-flash-lite-preview",
       "gemini-flash-latest"
     ];
 

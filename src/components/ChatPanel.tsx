@@ -292,11 +292,6 @@ export default function ChatPanel({ files }: ChatPanelProps) {
               <Send size={18} className={inputValue.trim() && !isTyping ? 'ml-0.5' : ''} />
             </button>
           </form>
-          <div className="text-center mt-2">
-            <p className="text-[10px] text-gray-400">
-              AI อาจให้ข้อมูลที่ไม่ถูกต้อง โปรดตรวจสอบกับเจ้าหน้าที่คลินิกอีกครั้ง
-            </p>
-          </div>
         </div>
       </div>
     </>
