@@ -13,6 +13,7 @@ const getAI = (apiKey: string) => new GoogleGenAI({ apiKey });
 
 // Helper for Cosine Similarity
 function cosineSimilarity(vecA: number[], vecB: number[]) {
+  if (!vecA || !vecB || vecA.length !== vecB.length) return 0;
   let dotProduct = 0;
   let normA = 0;
   let normB = 0;
@@ -21,7 +22,9 @@ function cosineSimilarity(vecA: number[], vecB: number[]) {
     normA += vecA[i] * vecA[i];
     normB += vecB[i] * vecB[i];
   }
-  return dotProduct / (Math.sqrt(normA) * Math.sqrt(normB));
+  const denominator = Math.sqrt(normA) * Math.sqrt(normB);
+  if (denominator === 0) return 0;
+  return dotProduct / denominator;
 }
 
 // Initialize KV with fallback for different environment variable names
@@ -172,56 +175,8 @@ app.post("/api/upload", async (req, res) => {
       addRandomSuffix: true
     }) : await mockPut(name, buffer, { contentType: mimeType });
 
-    let finalContent = content;
-    // If content is missing (e.g. PDF or Image uploaded from client without extraction)
-    const isImage = mimeType && mimeType.startsWith('image/');
-    if (!finalContent && (mimeType === 'application/pdf' || isImage) && inlineData) {
-      try {
-        const envKeys = (process.env.GEMINI_API_KEY || "").split(',').map(k => k.trim()).filter(k => k !== "");
-        if (envKeys.length > 0) {
-          const ai = getAI(envKeys[0]);
-          const prompt = mimeType === 'application/pdf' 
-            ? "Extract all text from this document accurately. Output only the text content."
-            : "Extract all text from this image accurately. If it's a document or contains text, transcribe it. Output only the text content.";
-          
-          const result = await ai.models.generateContent({
-            model: 'gemini-3.1-flash-lite-preview',
-            contents: {
-              parts: [
-                { inlineData: { data: inlineData, mimeType } },
-                { text: prompt }
-              ]
-            }
-          });
-          finalContent = result.text || '';
-        }
-      } catch (e) {
-        console.error('Failed to extract text via AI:', e);
-      }
-    }
-
-    // 1.5 Generate Embedding for the content (Phase 2: Ingestion)
-    let embedding = null;
-    if (finalContent && finalContent.length > 10) {
-      try {
-        const envKeys = (process.env.GEMINI_API_KEY || "").split(',').map(k => k.trim()).filter(k => k !== "");
-        if (envKeys.length > 0) {
-          const ai = getAI(envKeys[0]);
-          const result = await ai.models.embedContent({
-            model: 'gemini-embedding-2-preview',
-            contents: [finalContent.substring(0, 10000)], // Limit for embedding
-          });
-          if (result.embeddings && result.embeddings.length > 0) {
-            embedding = result.embeddings[0].values;
-          }
-        }
-      } catch (e) {
-        console.error("Embedding generation failed:", e);
-      }
-    }
-
     // 2. Save metadata to individual KV key and update ID list
-    const fileId = `file_${Date.now()}`;
+    const fileId = `file_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
     const newFile = {
       id: fileId,
       name,
@@ -231,16 +186,22 @@ app.post("/api/upload", async (req, res) => {
       size,
       url: blob.url,
       mimeType,
-      content: finalContent || null,
-      embedding: embedding,
-      inlineData: inlineData.length < 1000000 ? inlineData : null
+      content: content || null,
+      embedding: null,
+      inlineData: inlineData.length < 500000 ? inlineData : null // Reduced limit for KV safety
     };
     
     await kv.set(`clinic_file:${fileId}`, newFile);
     
-    const fileIds: string[] = await kv.get("clinic_files_ids") || [];
-    fileIds.unshift(fileId);
-    await kv.set("clinic_files_ids", fileIds);
+    // Use atomic lpush if available, otherwise fallback
+    const kvAny = kv as any;
+    if (typeof kvAny.lpush === 'function') {
+      await kvAny.lpush("clinic_files_ids", fileId);
+    } else {
+      const fileIds: string[] = await kv.get("clinic_files_ids") || [];
+      fileIds.unshift(fileId);
+      await kv.set("clinic_files_ids", fileIds);
+    }
     
     const { inlineData: _, content: __, ...responseFile } = newFile;
     if (responseFile.url && responseFile.url.startsWith('data:')) {
@@ -465,8 +426,18 @@ app.post("/api/chat", async (req, res) => {
     }
 
     // 2. Fetch and Rank Files
-    const allFiles = await Promise.all(activeFiles.map(async (f: any) => {
-      const fullFile: any = await kv.get(`clinic_file:${f.id}`);
+    let allFilesRaw: any[] = [];
+    const kvAny = kv as any;
+    if (activeFiles.length > 0) {
+      if (typeof kvAny.mget === 'function') {
+        const keys = activeFiles.map((f: any) => `clinic_file:${f.id}`);
+        allFilesRaw = await kvAny.mget(...keys);
+      } else {
+        allFilesRaw = await Promise.all(activeFiles.map((f: any) => kv.get(`clinic_file:${f.id}`)));
+      }
+    }
+
+    const allFiles = allFilesRaw.map((fullFile: any) => {
       if (!fullFile) return null;
       
       let score = 0;
@@ -495,7 +466,7 @@ app.post("/api/chat", async (req, res) => {
       }
       
       return { ...fullFile, score };
-    }));
+    });
 
     // Filter and sort by relevance
     const relevantFiles = allFiles

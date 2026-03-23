@@ -16,6 +16,7 @@ interface AdminPanelProps {
 
 const AdminPanel = ({ files, setFiles, categories, setCategories }: AdminPanelProps) => {
   const [isUploading, setIsUploading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState({ current: 0, total: 0 });
   const [uploadCategory, setUploadCategory] = useState(categories[0]?.id || '');
   const [showSuccess, setShowSuccess] = useState(false);
   const [newCategoryName, setNewCategoryName] = useState('');
@@ -29,9 +30,10 @@ const AdminPanel = ({ files, setFiles, categories, setCategories }: AdminPanelPr
   }>({ isOpen: false, title: '', message: '', type: 'alert', onConfirm: null });
   
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
   const [isDragging, setIsDragging] = useState(false);
   const [visibleCount, setVisibleCount] = useState(5);
+  const [searchTerm, setSearchTerm] = useState('');
 
   React.useEffect(() => {
     if (!uploadCategory && categories.length > 0) {
@@ -96,8 +98,8 @@ const AdminPanel = ({ files, setFiles, categories, setCategories }: AdminPanelPr
   const closeModal = () => setModal({ ...modal, isOpen: false });
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (e.target.files && e.target.files[0]) {
-      setSelectedFile(e.target.files[0]);
+    if (e.target.files && e.target.files.length > 0) {
+      setSelectedFiles(Array.from(e.target.files));
     }
   };
 
@@ -114,8 +116,8 @@ const AdminPanel = ({ files, setFiles, categories, setCategories }: AdminPanelPr
   const handleDrop = (e: React.DragEvent) => {
     e.preventDefault();
     setIsDragging(false);
-    if (e.dataTransfer.files && e.dataTransfer.files[0]) {
-      setSelectedFile(e.dataTransfer.files[0]);
+    if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+      setSelectedFiles(Array.from(e.dataTransfer.files));
     }
   };
 
@@ -185,17 +187,19 @@ const AdminPanel = ({ files, setFiles, categories, setCategories }: AdminPanelPr
   };
 
   const handleUpload = async () => {
-    if (!selectedFile) {
+    if (selectedFiles.length === 0) {
       setModal({ isOpen: true, title: 'แจ้งเตือน', message: 'กรุณาคลิกเพื่อเลือกไฟล์เอกสารก่อนทำการอัปโหลดครับ', type: 'alert', onConfirm: null });
       return;
     }
 
     const MAX_FILE_SIZE = 3 * 1024 * 1024; // 3MB
-    if (selectedFile.size > MAX_FILE_SIZE) {
+    const oversizedFiles = selectedFiles.filter(f => f.size > MAX_FILE_SIZE);
+    
+    if (oversizedFiles.length > 0) {
       setModal({ 
         isOpen: true, 
         title: 'ไฟล์ใหญ่เกินไป', 
-        message: 'ขนาดไฟล์ต้องไม่เกิน 3MB เนื่องจากข้อจำกัดของระบบอัปโหลดผ่านมือถือ กรุณาเลือกไฟล์ที่เล็กลง', 
+        message: `มีไฟล์จำนวน ${oversizedFiles.length} ไฟล์ที่มีขนาดเกิน 3MB กรุณาเลือกไฟล์ที่เล็กลงครับ`, 
         type: 'alert',
         onConfirm: null
       });
@@ -203,35 +207,70 @@ const AdminPanel = ({ files, setFiles, categories, setCategories }: AdminPanelPr
     }
 
     setIsUploading(true);
+    setUploadProgress({ current: 0, total: selectedFiles.length });
+    let successCount = 0;
+    let failCount = 0;
     
     try {
-      const processedData = await processUploadedFile(selectedFile);
-      
-      const response = await fetch('/api/upload', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          name: selectedFile.name,
-          category: uploadCategory,
-          mimeType: processedData.mimeType,
-          inlineData: processedData.inlineData,
-          content: processedData.content || null,
-          size: (selectedFile.size / (1024 * 1024)).toFixed(2) + ' MB',
-          date: new Date().toISOString().split('T')[0]
-        })
-      });
+      for (let i = 0; i < selectedFiles.length; i++) {
+        const file = selectedFiles[i];
+        setUploadProgress({ current: i + 1, total: selectedFiles.length });
+        try {
+          const processedData = await processUploadedFile(file);
+          
+          const response = await fetch('/api/upload', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              name: file.name,
+              category: uploadCategory,
+              mimeType: processedData.mimeType,
+              inlineData: processedData.inlineData,
+              content: processedData.content || null,
+              size: (file.size / (1024 * 1024)).toFixed(2) + ' MB',
+              date: new Date().toISOString().split('T')[0]
+            })
+          });
 
-      const result = await response.json();
+          const result = await response.json();
 
-      if (!response.ok) {
-        throw new Error(result.message || result.error || 'Upload failed');
+          if (!response.ok) {
+            throw new Error(result.message || result.error || 'Upload failed');
+          }
+          
+          setFiles(prev => [result, ...prev]);
+          successCount++;
+        } catch (err) {
+          console.error(`Failed to upload ${file.name}:`, err);
+          failCount++;
+        }
       }
       
-      setFiles(prev => [result, ...prev]);
-      setShowSuccess(true);
-      setSelectedFile(null);
-      if (fileInputRef.current) fileInputRef.current.value = '';
-      setTimeout(() => setShowSuccess(false), 3000);
+      if (successCount > 0) {
+        setShowSuccess(true);
+        setSelectedFiles([]);
+        if (fileInputRef.current) fileInputRef.current.value = '';
+        
+        setModal({ 
+          isOpen: true, 
+          title: 'อัปโหลดสำเร็จ', 
+          message: `อัปโหลดสำเร็จ ${successCount} ไฟล์เรียบร้อยแล้วครับ กรุณากดปุ่ม "ปรับปรุงฐานความรู้ (Optimize)" เพื่อให้ AI สามารถอ่านข้อมูลจากไฟล์ใหม่เหล่านี้ได้แม่นยำที่สุดครับ`, 
+          type: 'alert',
+          onConfirm: null
+        });
+        
+        setTimeout(() => setShowSuccess(false), 3000);
+      }
+
+      if (failCount > 0) {
+        setModal({ 
+          isOpen: true, 
+          title: 'อัปโหลดไม่สำเร็จบางส่วน', 
+          message: `อัปโหลดสำเร็จ ${successCount} ไฟล์ และไม่สำเร็จ ${failCount} ไฟล์`, 
+          type: 'alert',
+          onConfirm: null
+        });
+      }
     } catch (error: any) {
       setModal({ 
         isOpen: true, 
@@ -367,7 +406,14 @@ const AdminPanel = ({ files, setFiles, categories, setCategories }: AdminPanelPr
     });
   };
 
-  const visibleFiles = files.slice(0, visibleCount);
+  const filteredFiles = files.filter(file => {
+    const searchLower = searchTerm.toLowerCase();
+    const fileNameMatch = file.name.toLowerCase().includes(searchLower);
+    const categoryMatch = getCategoryName(file.category).toLowerCase().includes(searchLower);
+    return fileNameMatch || categoryMatch;
+  });
+
+  const visibleFiles = filteredFiles.slice(0, visibleCount);
 
   return (
     <div className="flex-1 overflow-y-auto p-4 sm:p-6 bg-gray-50 flex flex-col space-y-6 relative">
@@ -425,7 +471,7 @@ const AdminPanel = ({ files, setFiles, categories, setCategories }: AdminPanelPr
                 onDragOver={handleDragOver}
                 onDragLeave={handleDragLeave}
                 onDrop={handleDrop}
-                className={`border-2 border-dashed ${(isDragging || selectedFile) ? 'border-[#B11226] bg-[#fdf2f3]' : 'border-gray-300 hover:bg-gray-50'} rounded-lg p-6 flex flex-col items-center justify-center transition-colors cursor-pointer`}
+                className={`border-2 border-dashed ${(isDragging || selectedFiles.length > 0) ? 'border-[#B11226] bg-[#fdf2f3]' : 'border-gray-300 hover:bg-gray-50'} rounded-lg p-6 flex flex-col items-center justify-center transition-colors cursor-pointer`}
               >
                 <input 
                   type="file" 
@@ -433,11 +479,32 @@ const AdminPanel = ({ files, setFiles, categories, setCategories }: AdminPanelPr
                   onChange={handleFileChange} 
                   className="hidden" 
                   accept={acceptedExtensions}
+                  multiple
                 />
-                {selectedFile ? getFileIcon(selectedFile.name) : <FileText className="text-gray-400 mb-2" size={28} />}
-                <p className={`text-sm ${selectedFile ? 'text-[#B11226] font-medium text-center mt-2' : 'text-gray-600 mt-2'}`}>
-                  {selectedFile ? selectedFile.name : 'คลิกเพื่อเลือกไฟล์'}
-                </p>
+                {selectedFiles.length > 0 ? (
+                  <div className="flex flex-col items-center">
+                    <div className="flex -space-x-2 overflow-hidden mb-2">
+                      {selectedFiles.slice(0, 3).map((file, i) => (
+                        <div key={i} className="inline-block h-10 w-10 rounded-full ring-2 ring-white bg-gray-50 flex items-center justify-center shadow-sm">
+                          {getFileIcon(file.name)}
+                        </div>
+                      ))}
+                      {selectedFiles.length > 3 && (
+                        <div className="flex items-center justify-center h-10 w-10 rounded-full ring-2 ring-white bg-gray-100 text-[10px] font-medium text-gray-500 shadow-sm">
+                          +{selectedFiles.length - 3}
+                        </div>
+                      )}
+                    </div>
+                    <p className="text-sm text-[#B11226] font-medium text-center">
+                      {selectedFiles.length === 1 ? selectedFiles[0].name : `เลือกแล้ว ${selectedFiles.length} ไฟล์`}
+                    </p>
+                  </div>
+                ) : (
+                  <>
+                    <FileText className="text-gray-400 mb-2" size={28} />
+                    <p className="text-sm text-gray-600 mt-2">คลิกเพื่อเลือกไฟล์ (เลือกได้หลายไฟล์)</p>
+                  </>
+                )}
               </div>
               
               <div className="flex flex-col space-y-3">
@@ -462,7 +529,7 @@ const AdminPanel = ({ files, setFiles, categories, setCategories }: AdminPanelPr
                   }`}
                 >
                   {isUploading ? (
-                    <><div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin mr-2"></div> กำลังอัปโหลด...</>
+                    <><div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin mr-2"></div> กำลังอัปโหลด ({uploadProgress.current}/{uploadProgress.total})...</>
                   ) : showSuccess ? (
                     <><CheckCircle size={16} className="mr-2" /> สำเร็จ</>
                   ) : (
@@ -524,16 +591,28 @@ const AdminPanel = ({ files, setFiles, categories, setCategories }: AdminPanelPr
         {/* Right Column: File List */}
         <div className="flex-1 flex flex-col min-w-0">
           <div className="bg-white rounded-xl shadow-sm border border-gray-200 flex flex-col h-full">
-            <div className="p-5 border-b border-gray-100 flex items-center justify-between shrink-0">
+            <div className="p-5 border-b border-gray-100 flex flex-col sm:flex-row sm:items-center justify-between shrink-0 gap-4">
               <h3 className="font-semibold text-gray-800">รายการเอกสารในระบบ (File Management)</h3>
-              <span className="text-xs text-gray-400">แสดง {visibleFiles.length} จาก {files.length} รายการ</span>
+              <div className="relative flex-1 max-w-xs">
+                <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
+                  <Activity size={14} className="text-gray-400" />
+                </div>
+                <input
+                  type="text"
+                  value={searchTerm}
+                  onChange={(e) => setSearchTerm(e.target.value)}
+                  placeholder="ค้นหาชื่อไฟล์ หรือหมวดหมู่..."
+                  className="block w-full pl-10 pr-3 py-2 border border-gray-300 rounded-lg bg-gray-50 text-sm focus:ring-[#B11226] focus:border-[#B11226] outline-none"
+                />
+              </div>
+              <span className="text-xs text-gray-400">แสดง {visibleFiles.length} จาก {filteredFiles.length} รายการ</span>
             </div>
             
             <div className="p-4 overflow-y-auto">
-              {files.length === 0 ? (
+              {filteredFiles.length === 0 ? (
                 <div className="flex flex-col items-center justify-center py-12 text-gray-400">
                   <FileArchive size={48} className="mb-3 opacity-20" />
-                  <p>ยังไม่มีเอกสารในระบบ</p>
+                  <p>{searchTerm ? 'ไม่พบไฟล์ที่ค้นหา' : 'ยังไม่มีเอกสารในระบบ'}</p>
                 </div>
               ) : (
                 <div className="space-y-3">
@@ -578,7 +657,7 @@ const AdminPanel = ({ files, setFiles, categories, setCategories }: AdminPanelPr
                     </div>
                   ))}
                   
-                  {files.length > visibleCount && (
+                  {filteredFiles.length > visibleCount && (
                     <button 
                       onClick={() => setVisibleCount(prev => prev + 5)}
                       className="w-full py-3 text-sm text-gray-500 hover:text-[#B11226] flex items-center justify-center transition-colors"
