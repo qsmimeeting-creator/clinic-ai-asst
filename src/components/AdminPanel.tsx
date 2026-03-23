@@ -2,7 +2,8 @@ import React, { useState, useRef } from 'react';
 import { 
   Upload, FileText, Trash2, Activity, FileArchive, CheckCircle, 
   Plus, Tag, X, Image, Music, Video, File, FileSpreadsheet,
-  AlertCircle, Info, ChevronDown, ChevronUp, ToggleLeft, ToggleRight, Download
+  AlertCircle, Info, ChevronDown, ChevronUp, ToggleLeft, ToggleRight, Download,
+  Database
 } from 'lucide-react';
 import mammoth from 'mammoth';
 import * as XLSX from 'xlsx';
@@ -12,9 +13,13 @@ interface AdminPanelProps {
   setFiles: React.Dispatch<React.SetStateAction<any[]>>;
   categories: any[];
   setCategories: React.Dispatch<React.SetStateAction<any[]>>;
+  storageStatus?: {
+    kv: string;
+    blob: string;
+  };
 }
 
-const AdminPanel = ({ files, setFiles, categories, setCategories }: AdminPanelProps) => {
+const AdminPanel = ({ files, setFiles, categories, setCategories, storageStatus }: AdminPanelProps) => {
   const [isUploading, setIsUploading] = useState(false);
   const [uploadCategory, setUploadCategory] = useState(categories[0]?.id || '');
   const [showSuccess, setShowSuccess] = useState(false);
@@ -373,7 +378,7 @@ const AdminPanel = ({ files, setFiles, categories, setCategories }: AdminPanelPr
   return (
     <div className="flex-1 overflow-y-auto p-4 sm:p-6 bg-gray-50 flex flex-col space-y-6 relative">
       {/* Stats & Dashboard Summary */}
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 shrink-0">
+      <div className="grid grid-cols-1 sm:grid-cols-4 gap-4 shrink-0">
         <div className="bg-white p-4 rounded-xl shadow-sm border border-gray-100 flex items-center">
           <div className="bg-blue-100 p-3 rounded-full mr-4 text-blue-600"><FileArchive size={20} /></div>
           <div>
@@ -386,6 +391,20 @@ const AdminPanel = ({ files, setFiles, categories, setCategories }: AdminPanelPr
           <div>
             <p className="text-xs text-gray-500 font-medium">ใช้งานอยู่ (Active)</p>
             <p className="text-xl font-bold text-[#333333]">{files.filter(f => f.status === 'active').length}</p>
+          </div>
+        </div>
+        <div className="bg-white p-4 rounded-xl shadow-sm border border-gray-100 flex items-center">
+          <div className={`p-3 rounded-full mr-4 ${storageStatus?.kv === 'connected' ? 'bg-emerald-100 text-emerald-600' : 'bg-amber-100 text-amber-600'}`}>
+            <Database size={20} />
+          </div>
+          <div>
+            <p className="text-xs text-gray-500 font-medium">Vercel Storage</p>
+            <p className={`text-sm font-bold ${storageStatus?.kv === 'connected' ? 'text-emerald-600' : 'text-amber-600'}`}>
+              {storageStatus?.kv === 'connected' ? 'เชื่อมต่อแล้ว' : 'โหมดชั่วคราว'}
+            </p>
+            {storageStatus?.kv !== 'connected' && (
+              <p className="text-[10px] text-amber-500 leading-tight">ข้อมูลจะหายเมื่อรีสตาร์ท</p>
+            )}
           </div>
         </div>
         <div className="bg-white p-4 rounded-xl shadow-sm border border-gray-100 flex items-center justify-between">

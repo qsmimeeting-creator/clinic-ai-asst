@@ -25,13 +25,10 @@ function cosineSimilarity(vecA: number[], vecB: number[]) {
 }
 
 // Initialize KV with fallback for different environment variable names
-const hasKVConfig = (process.env.KV_REST_API_URL && process.env.KV_REST_API_TOKEN) || 
-                   (process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_REST_TOKEN) ||
-                   (process.env.KV_URL);
-
+const hasKVConfig = !!(process.env.KV_REST_API_URL && process.env.KV_REST_API_TOKEN);
 const hasBlobConfig = !!process.env.BLOB_READ_WRITE_TOKEN;
 
-// In-memory fallback for development without KV
+// In-memory fallback for development ONLY
 const memoryStore: Record<string, any> = {
   "clinic_files_ids": [],
   "clinic_categories": [
@@ -41,12 +38,25 @@ const memoryStore: Record<string, any> = {
 };
 
 const kv = hasKVConfig ? createClient({
-  url: process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL || "",
-  token: process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN || "",
+  url: process.env.KV_REST_API_URL || "",
+  token: process.env.KV_REST_API_TOKEN || "",
 }) : {
-  get: async (key: string) => memoryStore[key] || null,
-  set: async (key: string, value: any) => { memoryStore[key] = value; return "OK"; },
-  del: async (key: string) => { delete memoryStore[key]; return 1; },
+  get: async (key: string) => {
+    console.warn(`[KV Warning] Using memory fallback for key: ${key}. Data will be lost on restart.`);
+    return memoryStore[key] || null;
+  },
+  set: async (key: string, value: any) => {
+    console.warn(`[KV Warning] Saving to memory fallback for key: ${key}. Data will be lost on restart.`);
+    memoryStore[key] = value; 
+    return "OK"; 
+  },
+  del: async (key: string) => { 
+    delete memoryStore[key]; 
+    return 1; 
+  },
+  mget: async (...keys: string[]) => {
+    return keys.map(k => memoryStore[k] || null);
+  }
 };
 
 // Mock Blob put/del
@@ -74,10 +84,28 @@ app.use(express.json({ limit: '50mb' }));
 
 // API Routes
 
+// Health check and environment status
+app.get("/api/health", (req, res) => {
+  res.json({
+    status: "ok",
+    environment: process.env.NODE_ENV || "development",
+    storage: {
+      kv: hasKVConfig ? "connected" : "using_memory_fallback",
+      blob: hasBlobConfig ? "connected" : "using_mock_fallback"
+    },
+    gemini: !!process.env.GEMINI_API_KEY ? "configured" : "missing"
+  });
+});
+
 // Helper to check environment variables
 const checkEnv = () => {
-  // We no longer block if KV or Blob is missing because we have fallbacks
-  return [];
+  const missing = [];
+  if (process.env.NODE_ENV === "production") {
+    if (!hasKVConfig) missing.push("KV_REST_API_URL/TOKEN");
+    if (!hasBlobConfig) missing.push("BLOB_READ_WRITE_TOKEN");
+    if (!process.env.GEMINI_API_KEY) missing.push("GEMINI_API_KEY");
+  }
+  return missing;
 };
 
 // Fetch all data (files and categories)
@@ -110,7 +138,17 @@ app.get("/api/data", async (req, res) => {
       }));
     }
 
-    const categories = await kv.get("clinic_categories") || [];
+    let categories = await kv.get("clinic_categories") || [];
+    
+    // Seed default categories if empty
+    if (categories.length === 0) {
+      categories = [
+        { id: "cat_1", name: "ข้อมูลทั่วไป" },
+        { id: "cat_2", name: "ระเบียบการคลินิก" }
+      ];
+      await kv.set("clinic_categories", categories);
+    }
+    
     res.json({ files, categories });
   } catch (error: any) {
     console.error("KV Error:", error);
