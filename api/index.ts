@@ -25,17 +25,13 @@ function cosineSimilarity(vecA: number[], vecB: number[]) {
 }
 
 // Initialize KV with fallback for different environment variable names
-const kvUrl = process.env.KV_REST_API_URL || process.env.KV_URL || "";
-const kvToken = process.env.KV_REST_API_TOKEN || "";
+const hasKVConfig = (process.env.KV_REST_API_URL && process.env.KV_REST_API_TOKEN) || 
+                   (process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_REST_TOKEN) ||
+                   (process.env.KV_URL);
 
-if (kvUrl.startsWith('redis')) {
-  console.warn("[KV Warning] KV_REST_API_URL appears to be a redis:// URL. @vercel/kv createClient expects an https:// REST API URL. This might cause connection issues.");
-}
-
-const hasKVConfig = !!(kvUrl && (kvToken || kvUrl.includes("@")));
 const hasBlobConfig = !!process.env.BLOB_READ_WRITE_TOKEN;
 
-// In-memory fallback for development ONLY
+// In-memory fallback for development without KV
 const memoryStore: Record<string, any> = {
   "clinic_files_ids": [],
   "clinic_categories": [
@@ -45,25 +41,12 @@ const memoryStore: Record<string, any> = {
 };
 
 const kv = hasKVConfig ? createClient({
-  url: kvUrl,
-  token: kvToken,
+  url: process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL || "",
+  token: process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN || "",
 }) : {
-  get: async (key: string) => {
-    console.warn(`[KV Warning] Using memory fallback for key: ${key}`);
-    return memoryStore[key] || null;
-  },
-  set: async (key: string, value: any) => {
-    console.warn(`[KV Warning] Saving to memory fallback for key: ${key}`);
-    memoryStore[key] = value; 
-    return "OK"; 
-  },
-  del: async (key: string) => { 
-    delete memoryStore[key]; 
-    return 1; 
-  },
-  mget: async (...keys: string[]) => {
-    return keys.map(k => memoryStore[k] || null);
-  }
+  get: async (key: string) => memoryStore[key] || null,
+  set: async (key: string, value: any) => { memoryStore[key] = value; return "OK"; },
+  del: async (key: string) => { delete memoryStore[key]; return 1; },
 };
 
 // Mock Blob put/del
@@ -91,28 +74,10 @@ app.use(express.json({ limit: '50mb' }));
 
 // API Routes
 
-// Health check and environment status
-app.get("/api/health", (req, res) => {
-  res.json({
-    status: "ok",
-    environment: process.env.NODE_ENV || "development",
-    storage: {
-      kv: hasKVConfig ? "connected" : "using_memory_fallback",
-      blob: hasBlobConfig ? "connected" : "using_mock_fallback"
-    },
-    gemini: !!process.env.GEMINI_API_KEY ? "configured" : "missing"
-  });
-});
-
 // Helper to check environment variables
 const checkEnv = () => {
-  const missing = [];
-  if (process.env.NODE_ENV === "production") {
-    if (!hasKVConfig) missing.push("KV_REST_API_URL/TOKEN");
-    if (!hasBlobConfig) missing.push("BLOB_READ_WRITE_TOKEN");
-    if (!process.env.GEMINI_API_KEY) missing.push("GEMINI_API_KEY");
-  }
-  return missing;
+  // We no longer block if KV or Blob is missing because we have fallbacks
+  return [];
 };
 
 // Fetch all data (files and categories)
@@ -125,17 +90,13 @@ app.get("/api/data", async (req, res) => {
     });
   }
   try {
-    const fileIdsRaw = await kv.get("clinic_files_ids");
-    console.log(`[KV] Fetched file IDs: ${JSON.stringify(fileIdsRaw)}`);
-    const fileIds: string[] = Array.isArray(fileIdsRaw) ? fileIdsRaw : [];
+    const fileIds: string[] = await kv.get("clinic_files_ids") || [];
     const files = [];
     
     // Fetch each file metadata in parallel
     if (fileIds.length > 0) {
       const keys = fileIds.map(id => `clinic_file:${id}`);
-      console.log(`[KV] Fetching ${keys.length} file metadata keys`);
       const results = await kv.mget(...keys);
-      
       files.push(...results.filter(f => f !== null).map((f: any) => {
         const { inlineData, content, embedding, ...rest } = f;
         if (rest.url && rest.url.startsWith('data:')) {
@@ -143,24 +104,13 @@ app.get("/api/data", async (req, res) => {
         }
         return {
           ...rest,
-          hasContent: !!content && content.length > 0,
-          hasEmbedding: !!embedding && Array.isArray(embedding) && embedding.length > 0
+          hasContent: !!content,
+          hasEmbedding: !!embedding
         };
       }));
-      console.log(`[KV] Successfully retrieved ${files.length} files`);
     }
 
-    let categories = await kv.get("clinic_categories") || [];
-    
-    // Seed default categories if empty
-    if (categories.length === 0) {
-      categories = [
-        { id: "cat_1", name: "ข้อมูลทั่วไป" },
-        { id: "cat_2", name: "ระเบียบการคลินิก" }
-      ];
-      await kv.set("clinic_categories", categories);
-    }
-    
+    const categories = await kv.get("clinic_categories") || [];
     res.json({ files, categories });
   } catch (error: any) {
     console.error("KV Error:", error);
@@ -208,25 +158,21 @@ app.post("/api/upload", async (req, res) => {
 
     // 1. Upload to Vercel Blob
     const buffer = Buffer.from(inlineData, 'base64');
-    console.log(`Uploading file: ${name}, Size: ${buffer.length} bytes`);
     
     // Use real put if config exists, otherwise use mock
     const blob = hasBlobConfig ? await put(name, buffer, {
       contentType: mimeType,
       access: 'public',
+      // @ts-ignore - Some versions of the SDK might not have this in types but the API supports it
+      contentLength: buffer.length,
       addRandomSuffix: true
     }) : await mockPut(name, buffer, { contentType: mimeType });
-
-    console.log(`Blob Upload Success: ${blob.url}`);
 
     let finalContent = content;
     // If content is missing (e.g. PDF, Image, Audio, Video uploaded from client without extraction)
     const isMedia = mimeType && (mimeType.startsWith('image/') || mimeType.startsWith('audio/') || mimeType.startsWith('video/'));
-    const isPDF = mimeType === 'application/pdf';
-    
-    if (!finalContent && (isPDF || isMedia) && inlineData) {
+    if (!finalContent && (mimeType === 'application/pdf' || isMedia) && inlineData) {
       try {
-        console.log(`[AI] Extracting text for: ${name} (${mimeType})`);
         const envKeys = (process.env.GEMINI_API_KEY || "").split(',').map(k => k.trim()).filter(k => k !== "");
         if (envKeys.length > 0) {
           const ai = getAI(envKeys[0]);
@@ -236,7 +182,7 @@ app.post("/api/upload", async (req, res) => {
           if (mimeType.startsWith('video/')) prompt = "Transcribe the audio in this video and describe any important text shown on screen. Output only the text.";
           
           const result = await ai.models.generateContent({
-            model: 'gemini-3-flash-preview',
+            model: 'gemini-3.1-flash-lite-preview',
             contents: {
               parts: [
                 { inlineData: { data: inlineData, mimeType } },
@@ -245,34 +191,29 @@ app.post("/api/upload", async (req, res) => {
             }
           });
           finalContent = result.text || '';
-          console.log(`[AI] Extraction Success for ${name}. Length: ${finalContent.length}`);
-        } else {
-          console.warn("[AI] Missing GEMINI_API_KEY for text extraction");
         }
-      } catch (e: any) {
-        console.error(`[AI] Extraction failed for ${name}:`, e.message);
+      } catch (e) {
+        console.error('Failed to extract text via AI:', e);
       }
     }
 
-    // 1.5 Generate Embedding for the content
+    // 1.5 Generate Embedding for the content (Phase 2: Ingestion)
     let embedding = null;
-    if (finalContent && finalContent.length > 5) {
+    if (finalContent && finalContent.length > 10) {
       try {
-        console.log(`Generating embedding for: ${name}`);
         const envKeys = (process.env.GEMINI_API_KEY || "").split(',').map(k => k.trim()).filter(k => k !== "");
         if (envKeys.length > 0) {
           const ai = getAI(envKeys[0]);
           const result = await ai.models.embedContent({
             model: 'gemini-embedding-2-preview',
-            contents: [finalContent.substring(0, 10000)],
+            contents: [finalContent.substring(0, 10000)], // Limit for embedding
           });
           if (result.embeddings && result.embeddings.length > 0) {
             embedding = result.embeddings[0].values;
-            console.log(`Embedding Success for: ${name}`);
           }
         }
-      } catch (e: any) {
-        console.error("Embedding generation failed:", e.message);
+      } catch (e) {
+        console.error("Embedding generation failed:", e);
       }
     }
 
@@ -289,20 +230,16 @@ app.post("/api/upload", async (req, res) => {
       mimeType,
       content: finalContent || null,
       embedding: embedding,
-      // REMOVED inlineData from KV to stay under 1MB limit
+      inlineData: inlineData.length < 1000000 ? inlineData : null
     };
     
     await kv.set(`clinic_file:${fileId}`, newFile);
     
-    let fileIdsRaw = await kv.get("clinic_files_ids");
-    let fileIds: string[] = Array.isArray(fileIdsRaw) ? fileIdsRaw : [];
-    
+    const fileIds: string[] = await kv.get("clinic_files_ids") || [];
     fileIds.unshift(fileId);
-    fileIds = [...new Set(fileIds)].slice(0, 500);
-    
     await kv.set("clinic_files_ids", fileIds);
     
-    const { content: _, ...responseFile } = newFile;
+    const { inlineData: _, content: __, ...responseFile } = newFile;
     if (responseFile.url && responseFile.url.startsWith('data:')) {
       responseFile.url = null as any; // Strip data URI
     }
@@ -428,23 +365,19 @@ app.post("/api/admin/optimize-files", async (req, res) => {
       
       // Extract content if missing (especially for PDFs and Media)
       const isMedia = file.mimeType && (file.mimeType.startsWith('image/') || file.mimeType.startsWith('audio/') || file.mimeType.startsWith('video/'));
-      const isPDF = file.mimeType === 'application/pdf';
-      
-      if (!file.content && (isPDF || isMedia)) {
+      if (!file.content && (file.mimeType === 'application/pdf' || isMedia)) {
         try {
-          console.log(`[Optimize] Attempting extraction for ${file.name}`);
           let fileData = file.inlineData;
           if (!fileData && file.url) {
             if (file.url.startsWith('data:')) {
               fileData = file.url.split(',')[1];
             } else {
-              console.log(`[Optimize] Fetching file from URL: ${file.url}`);
               const resp = await fetch(file.url);
               const arrayBuffer = await resp.arrayBuffer();
               fileData = Buffer.from(arrayBuffer).toString('base64');
             }
           }
-          
+
           if (fileData) {
             let prompt = "Extract all text from this document accurately. Output only the text content.";
             if (file.mimeType.startsWith('image/')) prompt = "Extract all text from this image accurately. If it's a document or contains text, transcribe it. Output only the text content.";
@@ -452,7 +385,7 @@ app.post("/api/admin/optimize-files", async (req, res) => {
             if (file.mimeType.startsWith('video/')) prompt = "Transcribe the audio in this video and describe any important text shown on screen. Output only the text.";
 
             const result = await ai.models.generateContent({
-              model: 'gemini-3-flash-preview',
+              model: 'gemini-3.1-flash-lite-preview',
               contents: {
                 parts: [
                   { inlineData: { data: fileData, mimeType: file.mimeType } },
@@ -463,11 +396,10 @@ app.post("/api/admin/optimize-files", async (req, res) => {
             if (result.text) {
               file.content = result.text;
               updated = true;
-              console.log(`[Optimize] Extraction success for ${file.name}`);
             }
           }
-        } catch (e: any) {
-          console.error(`[Optimize] Text extraction failed for ${file.name}:`, e.message);
+        } catch (e) {
+          console.error(`Text extraction failed for ${file.name}:`, e);
         }
       }
       
@@ -488,8 +420,6 @@ app.post("/api/admin/optimize-files", async (req, res) => {
       }
 
       if (updated) {
-        // Ensure we don't save large inlineData back to KV
-        if (file.inlineData) delete file.inlineData;
         await kv.set(`clinic_file:${id}`, file);
         optimizedCount++;
       }
@@ -672,6 +602,7 @@ app.post("/api/chat", async (req, res) => {
               3. หากข้อมูลในเอกสารไม่เพียงพอ ให้ตอบอย่างสุภาพว่า "ขออภัยค่ะ ข้อมูลที่ให้มาไม่เพียงพอที่จะตอบคำถามนี้ รบกวนติดต่อเจ้าหน้าที่คลินิกโดยตรงนะคะ"
               4. ห้ามให้คำแนะนำทางการแพทย์ที่อยู่นอกเหนือจากเอกสารเด็ดขาด
               5. ข้อมูลสำคัญของคลินิก: คลินิกรับบริการเฉพาะ Walk-in เท่านั้น (ไม่มีการจองคิวล่วงหน้า) ให้แจ้งผู้ป่วยตามนี้หากมีการสอบถามเรื่องการจองคิวหรือนัดหมาย
+              6. เมื่อมีการถามถึงวัคซีนชนิดใดก็ตาม ให้ระบุราคาของวัคซีนชนิดนั้นๆ ในคำตอบด้วยเสมอ (โดยอ้างอิงราคาจากเอกสาร)
               
               รูปแบบการตอบ:
               - ใช้ภาษาไทยที่สุภาพ เป็นธรรมชาติ (มี ค่ะ/ครับ ตามความเหมาะสม)

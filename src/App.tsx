@@ -29,26 +29,18 @@ export default function App() {
   const [categories, setCategories] = useState([]);
   const [files, setFiles] = useState([]);
   const [isLoading, setIsLoading] = useState(true);
-  const [storageStatus, setStorageStatus] = useState<any>(null);
 
   useEffect(() => {
     const fetchData = async () => {
       try {
-        const [dataRes, healthRes] = await Promise.all([
-          fetch('/api/data'),
-          fetch('/api/health')
-        ]);
+        const response = await fetch('/api/data');
+        const data = await response.json();
         
-        const data = await dataRes.json();
-        const health = await healthRes.json();
-        
-        if (dataRes.ok) {
+        if (response.ok) {
           setFiles(data.files || []);
           setCategories(data.categories || []);
-        }
-        
-        if (healthRes.ok) {
-          setStorageStatus(health.storage);
+        } else {
+          console.error("Server error fetching data:", data.message || data.error);
         }
       } catch (error) {
         console.error("Failed to fetch data:", error);
@@ -330,7 +322,6 @@ export default function App() {
             setFiles={setFiles} 
             categories={categories} 
             setCategories={setCategories}
-            storageStatus={storageStatus}
           />
         ) : (
           <>
