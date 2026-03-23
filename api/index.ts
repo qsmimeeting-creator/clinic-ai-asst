@@ -24,6 +24,8 @@ function cosineSimilarity(vecA: number[], vecB: number[]) {
   return dotProduct / (Math.sqrt(normA) * Math.sqrt(normB));
 }
 
+import fs from "fs";
+
 // Initialize KV with fallback for different environment variable names
 const hasKVConfig = (process.env.KV_REST_API_URL && process.env.KV_REST_API_TOKEN) || 
                    (process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_REST_TOKEN) ||
@@ -31,22 +33,52 @@ const hasKVConfig = (process.env.KV_REST_API_URL && process.env.KV_REST_API_TOKE
 
 const hasBlobConfig = !!process.env.BLOB_READ_WRITE_TOKEN;
 
-// In-memory fallback for development without KV
-const memoryStore: Record<string, any> = {
-  "clinic_files_ids": [],
-  "clinic_categories": [
-    { id: "cat_1", name: "ข้อมูลทั่วไป" },
-    { id: "cat_2", name: "ระเบียบการคลินิก" }
-  ]
+// Local file fallback for development without KV
+const LOCAL_DB_PATH = path.join(__dirname, "local_db.json");
+
+const loadLocalDb = () => {
+  try {
+    if (fs.existsSync(LOCAL_DB_PATH)) {
+      const data = fs.readFileSync(LOCAL_DB_PATH, "utf-8");
+      return JSON.parse(data);
+    }
+  } catch (e) {
+    console.error("Error loading local db:", e);
+  }
+  return {
+    "clinic_files_ids": [],
+    "clinic_categories": [
+      { id: "cat_1", name: "ข้อมูลทั่วไป" },
+      { id: "cat_2", name: "ระเบียบการคลินิก" }
+    ]
+  };
 };
+
+const saveLocalDb = (data: any) => {
+  try {
+    fs.writeFileSync(LOCAL_DB_PATH, JSON.stringify(data, null, 2), "utf-8");
+  } catch (e) {
+    console.error("Error saving local db:", e);
+  }
+};
+
+let memoryStore: Record<string, any> = loadLocalDb();
 
 const kv = hasKVConfig ? createClient({
   url: process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL || "",
   token: process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN || "",
 }) : {
   get: async (key: string) => memoryStore[key] || null,
-  set: async (key: string, value: any) => { memoryStore[key] = value; return "OK"; },
-  del: async (key: string) => { delete memoryStore[key]; return 1; },
+  set: async (key: string, value: any) => { 
+    memoryStore[key] = value; 
+    saveLocalDb(memoryStore);
+    return "OK"; 
+  },
+  del: async (key: string) => { 
+    delete memoryStore[key]; 
+    saveLocalDb(memoryStore);
+    return 1; 
+  },
   mget: async (...keys: string[]) => keys.map(key => memoryStore[key] || null),
 };
 
