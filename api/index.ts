@@ -47,6 +47,7 @@ const kv = hasKVConfig ? createClient({
   get: async (key: string) => memoryStore[key] || null,
   set: async (key: string, value: any) => { memoryStore[key] = value; return "OK"; },
   del: async (key: string) => { delete memoryStore[key]; return 1; },
+  mget: async (...keys: string[]) => keys.map(key => memoryStore[key] || null),
 };
 
 // Mock Blob put/del
@@ -95,8 +96,8 @@ app.get("/api/data", async (req, res) => {
     
     // Fetch each file metadata in parallel
     if (fileIds.length > 0) {
-      const filePromises = fileIds.map(id => kv.get(`clinic_file:${id}`));
-      const results = await Promise.all(filePromises);
+      const keys = fileIds.map(id => `clinic_file:${id}`);
+      const results = await kv.mget(...keys);
       files.push(...results.filter(f => f !== null).map((f: any) => {
         const { inlineData, content, embedding, ...rest } = f;
         if (rest.url && rest.url.startsWith('data:')) {
@@ -476,36 +477,39 @@ app.post("/api/chat", async (req, res) => {
     }
 
     // 2. Fetch and Rank Files
-    const allFiles = await Promise.all(activeFiles.map(async (f: any) => {
-      const fullFile: any = await kv.get(`clinic_file:${f.id}`);
-      if (!fullFile) return null;
+    let allFiles: any[] = [];
+    if (activeFiles.length > 0) {
+      const keys = activeFiles.map((f: any) => `clinic_file:${f.id}`);
+      const fullFiles = await kv.mget(...keys);
       
-      let score = 0;
-      if (queryEmbedding && fullFile.embedding) {
-        score = cosineSimilarity(queryEmbedding, fullFile.embedding);
-      } else {
-        // Fallback to simple keyword match if embedding fails
-        const q = query.toLowerCase();
-        const keywords = q.split(/\s+/).filter(k => k.length > 1);
-        
-        // Check name
-        const fileName = fullFile.name.toLowerCase();
-        keywords.forEach(kw => {
-          if (fileName.includes(kw)) score += 0.2;
-        });
-        if (fileName.includes(q)) score += 0.5;
-
-        // Check content
-        if (fullFile.content) {
-          const content = fullFile.content.toLowerCase();
+      allFiles = fullFiles.filter(f => f !== null).map((fullFile: any) => {
+        let score = 0;
+        if (queryEmbedding && fullFile.embedding) {
+          score = cosineSimilarity(queryEmbedding, fullFile.embedding);
+        } else {
+          // Fallback to simple keyword match if embedding fails
+          const q = query.toLowerCase();
+          const keywords = q.split(/\s+/).filter(k => k.length > 1);
+          
+          // Check name
+          const fileName = fullFile.name.toLowerCase();
           keywords.forEach(kw => {
-            if (content.includes(kw)) score += 0.1;
+            if (fileName.includes(kw)) score += 0.2;
           });
-          if (content.includes(q)) score += 0.3;
+          if (fileName.includes(q)) score += 0.5;
+
+          // Check content
+          if (fullFile.content) {
+            const content = fullFile.content.toLowerCase();
+            keywords.forEach(kw => {
+              if (content.includes(kw)) score += 0.1;
+            });
+            if (content.includes(q)) score += 0.3;
+          }
         }
-      }
-      return { ...fullFile, score };
-    }));
+        return { ...fullFile, score };
+      });
+    }
 
     // Filter and sort by relevance
     const relevantFiles = allFiles
@@ -598,6 +602,8 @@ app.post("/api/chat", async (req, res) => {
               2. อ้างอิงข้อมูลจากเอกสารที่คัดเลือกมาให้เท่านั้น (Context)
               3. หากข้อมูลในเอกสารไม่เพียงพอ ให้ตอบอย่างสุภาพว่า "ขออภัยค่ะ ข้อมูลที่ให้มาไม่เพียงพอที่จะตอบคำถามนี้ รบกวนติดต่อเจ้าหน้าที่คลินิกโดยตรงนะคะ"
               4. ห้ามให้คำแนะนำทางการแพทย์ที่อยู่นอกเหนือจากเอกสารเด็ดขาด
+              5. ข้อมูลสำคัญของคลินิก: คลินิกรับบริการเฉพาะ Walk-in เท่านั้น (ไม่มีการจองคิวล่วงหน้า) ให้แจ้งผู้ป่วยตามนี้หากมีการสอบถามเรื่องการจองคิวหรือนัดหมาย
+              6. เมื่อมีการถามถึงวัคซีนชนิดใดก็ตาม ให้ระบุราคาของวัคซีนชนิดนั้นๆ ในคำตอบด้วยเสมอ (โดยอ้างอิงราคาจากเอกสาร)
               
               รูปแบบการตอบ:
               - ใช้ภาษาไทยที่สุภาพ เป็นธรรมชาติ (มี ค่ะ/ครับ ตามความเหมาะสม)
