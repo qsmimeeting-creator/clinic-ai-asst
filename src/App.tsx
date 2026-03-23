@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
-import { Send, Bot, Settings, ArrowLeft, Database, Mic } from 'lucide-react';
+import { Send, Bot, Settings, ArrowLeft, Database, Mic, AlertCircle } from 'lucide-react';
 
 // Modularized Components
 import AdminPanel from './components/AdminPanel';
@@ -29,27 +29,37 @@ export default function App() {
   const [categories, setCategories] = useState([]);
   const [files, setFiles] = useState([]);
   const [isLoading, setIsLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
+
+  const fetchData = useCallback(async () => {
+    setIsLoading(true);
+    setLoadError(null);
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 15000); // 15s timeout
+
+      const response = await fetch('/api/data', { signal: controller.signal });
+      clearTimeout(timeoutId);
+      
+      const data = await response.json();
+      
+      if (response.ok) {
+        setFiles(data.files || []);
+        setCategories(data.categories || []);
+      } else {
+        setLoadError(data.message || data.error || "Server error fetching data");
+      }
+    } catch (error: any) {
+      console.error("Failed to fetch data:", error);
+      setLoadError(error.name === 'AbortError' ? "การเชื่อมต่อใช้เวลานานเกินไป กรุณาลองใหม่อีกครั้ง" : "ไม่สามารถเชื่อมต่อกับเซิร์ฟเวอร์ได้");
+    } finally {
+      setIsLoading(false);
+    }
+  }, []);
 
   useEffect(() => {
-    const fetchData = async () => {
-      try {
-        const response = await fetch('/api/data');
-        const data = await response.json();
-        
-        if (response.ok) {
-          setFiles(data.files || []);
-          setCategories(data.categories || []);
-        } else {
-          console.error("Server error fetching data:", data.message || data.error);
-        }
-      } catch (error) {
-        console.error("Failed to fetch data:", error);
-      } finally {
-        setIsLoading(false);
-      }
-    };
     fetchData();
-  }, []);
+  }, [fetchData]);
 
   const [messages, setMessages] = useState<Message[]>([
     {
@@ -303,6 +313,18 @@ export default function App() {
         <div className="flex flex-col items-center justify-center space-y-4">
           <div className="w-12 h-12 border-4 border-[#B11226] border-t-transparent rounded-full animate-spin"></div>
           <p className="text-gray-500 font-medium">กำลังเชื่อมต่อ Vercel Storage...</p>
+        </div>
+      ) : loadError ? (
+        <div className="flex flex-col items-center justify-center space-y-4 p-6 bg-white rounded-xl shadow-lg max-w-sm text-center">
+          <div className="bg-red-100 p-3 rounded-full text-red-600"><AlertCircle size={32} /></div>
+          <h2 className="text-lg font-bold text-gray-900">การเชื่อมต่อขัดข้อง</h2>
+          <p className="text-gray-600 text-sm">{loadError}</p>
+          <button 
+            onClick={fetchData}
+            className="w-full py-2 bg-[#B11226] text-white rounded-lg hover:bg-[#8a0e1d] transition-colors font-medium"
+          >
+            ลองใหม่อีกครั้ง
+          </button>
         </div>
       ) : (
         <>

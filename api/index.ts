@@ -93,14 +93,22 @@ app.get("/api/data", async (req, res) => {
     const fileIds: string[] = await kv.get("clinic_files_ids") || [];
     const files = [];
     
-    // Fetch each file metadata in parallel
+    // Fetch each file metadata in parallel using mget if possible
     if (fileIds.length > 0) {
-      const filePromises = fileIds.map(id => kv.get(`clinic_file:${id}`));
-      const results = await Promise.all(filePromises);
+      let results: any[] = [];
+      const kvAny = kv as any;
+      if (typeof kvAny.mget === 'function') {
+        const keys = fileIds.map(id => `clinic_file:${id}`);
+        results = await kvAny.mget(...keys);
+      } else {
+        const filePromises = fileIds.map(id => kv.get(`clinic_file:${id}`));
+        results = await Promise.all(filePromises);
+      }
+      
       files.push(...results.filter(f => f !== null).map((f: any) => {
-        const { inlineData, content, ...rest } = f;
+        const { inlineData, content, embedding, ...rest } = f;
         if (rest.url && rest.url.startsWith('data:')) {
-          rest.url = null; // Strip data URI to save bandwidth, frontend will use /api/files/:id/download
+          rest.url = null; // Strip data URI to save bandwidth
         }
         return rest;
       }));
@@ -464,27 +472,28 @@ app.post("/api/chat", async (req, res) => {
       let score = 0;
       if (queryEmbedding && fullFile.embedding) {
         score = cosineSimilarity(queryEmbedding, fullFile.embedding);
-      } else {
-        // Fallback to simple keyword match if embedding fails
-        const q = query.toLowerCase();
-        const keywords = q.split(/\s+/).filter(k => k.length > 1);
-        
-        // Check name
-        const fileName = fullFile.name.toLowerCase();
-        keywords.forEach(kw => {
-          if (fileName.includes(kw)) score += 0.2;
-        });
-        if (fileName.includes(q)) score += 0.5;
-
-        // Check content
-        if (fullFile.content) {
-          const content = fullFile.content.toLowerCase();
-          keywords.forEach(kw => {
-            if (content.includes(kw)) score += 0.1;
-          });
-          if (content.includes(q)) score += 0.3;
-        }
       }
+      
+      // Always do a keyword fallback to boost relevance or handle missing embeddings
+      const q = query.toLowerCase();
+      const keywords = q.split(/\s+/).filter(k => k.length > 1);
+      
+      // Check name
+      const fileName = fullFile.name.toLowerCase();
+      keywords.forEach(kw => {
+        if (fileName.includes(kw)) score += 0.1;
+      });
+      if (fileName.includes(q)) score += 0.3;
+
+      // Check content
+      if (fullFile.content) {
+        const content = fullFile.content.toLowerCase();
+        keywords.forEach(kw => {
+          if (content.includes(kw)) score += 0.05;
+        });
+        if (content.includes(q)) score += 0.2;
+      }
+      
       return { ...fullFile, score };
     }));
 
@@ -574,16 +583,21 @@ app.post("/api/chat", async (req, res) => {
               thinkingConfig: { thinkingLevel: ThinkingLevel.LOW }, // Phase 1: Reduce thinking latency
               systemInstruction: `คุณคือผู้ช่วย AI ของคลินิก (เปรียบเสมือนพยาบาลหรือเจ้าหน้าที่คลินิกที่มีความใส่ใจ เป็นมิตร และน่าเชื่อถือ) และมีบทบาทเป็น "แพทย์ผู้เชี่ยวชาญด้านวัคซีนและภูมิคุ้มกันวิทยา"
               
+              ข้อมูลสำคัญของคลินิก (System Knowledge):
+              - คลินิกรับบริการเฉพาะ Walk-in เท่านั้น (ไม่รับจองคิวล่วงหน้า)
+              - ให้บริการปรึกษาเรื่องวัคซีนและภูมิคุ้มกันวิทยา
+              
               เป้าหมายหลักของคุณ:
               1. ตอบคำถามผู้ป่วยอย่างถูกต้อง ชัดเจน เข้าใจง่าย และมีความเห็นอกเห็นใจ
-              2. อ้างอิงข้อมูลจากเอกสารที่คัดเลือกมาให้เท่านั้น (Context)
-              3. หากข้อมูลในเอกสารไม่เพียงพอ ให้ตอบอย่างสุภาพว่า "ขออภัยค่ะ ข้อมูลที่ให้มาไม่เพียงพอที่จะตอบคำถามนี้ รบกวนติดต่อเจ้าหน้าที่คลินิกโดยตรงนะคะ"
-              4. ห้ามให้คำแนะนำทางการแพทย์ที่อยู่นอกเหนือจากเอกสารเด็ดขาด
+              2. อ้างอิงข้อมูลจากเอกสารที่คัดเลือกมาให้ (Context) และข้อมูลสำคัญของคลินิก (System Knowledge)
+              3. เมื่อมีการถามถึงวัคซีนชนิดใด ให้พยายามค้นหาราคาวัคซีนชนิดนั้นจากเอกสารและแจ้งราคาไปด้วยเสมอ
+              4. หากข้อมูลในเอกสารไม่เพียงพอ ให้ตอบตามข้อมูล System Knowledge หากมี หรือตอบอย่างสุภาพว่า "ขออภัยค่ะ ข้อมูลที่ให้มาไม่เพียงพอที่จะตอบคำถามนี้ รบกวนติดต่อเจ้าหน้าที่คลินิกโดยตรงนะคะ"
+              5. ห้ามให้คำแนะนำทางการแพทย์ที่อยู่นอกเหนือจากเอกสารเด็ดขาด
               
               รูปแบบการตอบ:
               - ใช้ภาษาไทยที่สุภาพ เป็นธรรมชาติ (มี ค่ะ/ครับ ตามความเหมาะสม)
               - จัดรูปแบบข้อความให้อ่านง่าย ใช้ Markdown (เช่น **ตัวหนา**, - Bullet points)
-              - ระบุชื่อไฟล์ที่ใช้อ้างอิงในคำตอบด้วย
+              - ระบุชื่อไฟล์ที่ใช้อ้างอิงในคำตอบด้วย (ถ้ามี)
               
               สำคัญมาก: ตอบกลับในรูปแบบ JSON ที่มีโครงสร้างดังนี้เท่านั้น:
               {
@@ -629,6 +643,8 @@ app.post("/api/chat", async (req, res) => {
 
           if (errorMsg.includes("429") || errorMsg.toLowerCase().includes("quota") || errorMsg.toLowerCase().includes("too many requests")) {
             console.warn(`API Key quota exceeded for model ${modelName}, trying next key/model...`);
+            // Small delay to let the rate limit settle
+            await new Promise(resolve => setTimeout(resolve, 500));
             continue;
           } else {
             console.error(`API Error with current key for model ${modelName}:`, errorMsg);
@@ -640,7 +656,10 @@ app.post("/api/chat", async (req, res) => {
 
     // If we get here, all keys failed
     if (!headersSent) {
-      res.status(500).json({ error: "All API keys failed or were exhausted." });
+      res.status(500).json({ 
+        error: "All API keys failed or were exhausted.",
+        details: "โควตาการใช้งาน AI ของคุณเต็มแล้ว กรุณาเพิ่ม API Key ใน Vercel Dashboard หรือลองใหม่อีกครั้งภายหลัง"
+      });
     }
   } catch (error: any) {
     console.error("Gemini API error:", error);

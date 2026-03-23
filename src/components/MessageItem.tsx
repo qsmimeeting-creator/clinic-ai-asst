@@ -1,5 +1,5 @@
 import React, { memo } from 'react';
-import { User, Bot, FileText, Search, ShieldAlert, AlertTriangle, Info, Volume2, VolumeX, HelpCircle } from 'lucide-react';
+import { User, Bot, FileText, Search, ShieldAlert, AlertTriangle, Info, HelpCircle } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 
@@ -18,11 +18,9 @@ interface Message {
 
 interface MessageItemProps {
   msg: Message;
-  speakingId: number | null;
-  toggleSpeech: (text: string, id: number) => void;
 }
 
-const MessageItem = memo(({ msg, speakingId, toggleSpeech }: MessageItemProps) => {
+const MessageItem = memo(({ msg }: MessageItemProps) => {
   const renderBotMessageContent = () => {
     switch (msg.type) {
       case 'welcome':
@@ -180,30 +178,16 @@ const MessageItem = memo(({ msg, speakingId, toggleSpeech }: MessageItemProps) =
               renderBotMessageContent()
             )}
           </div>
-          
-          {msg.sender === 'bot' && (
-            <div className="flex items-center space-x-2 mt-1.5 ml-1">
-              <button 
-                onClick={() => toggleSpeech(msg.text, msg.id)} 
-                className={`transition-colors p-1 ${speakingId === msg.id ? 'text-[#B11226]' : 'text-gray-400 hover:text-[#B11226]'}`}
-                title={speakingId === msg.id ? 'หยุดอ่านเสียง' : 'อ่านออกเสียง'}
-              >
-                {speakingId === msg.id ? <VolumeX size={14} /> : <Volume2 size={14} />}
-              </button>
-            </div>
-          )}
         </div>
       </div>
     </div>
   );
 }, (prevProps, nextProps) => {
-  // Only re-render if the message text, streaming status, or speaking status changes
+  // Only re-render if the message text, streaming status, or response time changes
   return (
     prevProps.msg.text === nextProps.msg.text &&
     prevProps.msg.isStreaming === nextProps.msg.isStreaming &&
-    prevProps.msg.responseTime === nextProps.msg.responseTime &&
-    prevProps.speakingId === nextProps.speakingId &&
-    (prevProps.speakingId !== prevProps.msg.id && nextProps.speakingId !== nextProps.msg.id)
+    prevProps.msg.responseTime === nextProps.msg.responseTime
   );
 });
 
