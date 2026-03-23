@@ -339,24 +339,40 @@ app.post("/api/admin/optimize-files", async (req, res) => {
       
       // Extract content if missing (especially for PDFs and Images)
       const isImage = file.mimeType && file.mimeType.startsWith('image/');
-      if (!file.content && (file.mimeType === 'application/pdf' || isImage) && file.inlineData) {
+      const isPDF = file.mimeType === 'application/pdf';
+      
+      if (!file.content && (isPDF || isImage)) {
         try {
-          const prompt = file.mimeType === 'application/pdf'
-            ? "Extract all text from this document accurately. Output only the text content."
-            : "Extract all text from this image accurately. If it's a document or contains text, transcribe it. Output only the text content.";
-
-          const result = await ai.models.generateContent({
-            model: 'gemini-3.1-flash-lite-preview',
-            contents: {
-              parts: [
-                { inlineData: { data: file.inlineData, mimeType: file.mimeType } },
-                { text: prompt }
-              ]
+          let fileData = file.inlineData;
+          
+          // If inlineData is missing (due to size limits), fetch from URL
+          if (!fileData && file.url) {
+            console.log(`Fetching file data from URL for optimization: ${file.name}`);
+            const resp = await fetch(file.url);
+            if (resp.ok) {
+              const arrayBuffer = await resp.arrayBuffer();
+              fileData = Buffer.from(arrayBuffer).toString('base64');
             }
-          });
-          if (result.text) {
-            file.content = result.text;
-            updated = true;
+          }
+          
+          if (fileData) {
+            const prompt = isPDF
+              ? "Extract all text from this document accurately. Output only the text content."
+              : "Extract all text from this image accurately. If it's a document or contains text, transcribe it. Output only the text content.";
+
+            const result = await ai.models.generateContent({
+              model: 'gemini-3.1-flash-lite-preview',
+              contents: {
+                parts: [
+                  { inlineData: { data: fileData, mimeType: file.mimeType } },
+                  { text: prompt }
+                ]
+              }
+            });
+            if (result.text) {
+              file.content = result.text;
+              updated = true;
+            }
           }
         } catch (e) {
           console.error(`Text extraction failed for ${file.name}:`, e);
@@ -364,8 +380,9 @@ app.post("/api/admin/optimize-files", async (req, res) => {
       }
       
       // Generate embedding if missing
-      if (!file.embedding && file.content && file.content.length > 10) {
+      if (!file.embedding && file.content && file.content.length > 5) {
         try {
+          console.log(`Generating embedding for: ${file.name}`);
           const result = await ai.models.embedContent({
             model: 'gemini-embedding-2-preview',
             contents: [file.content.substring(0, 10000)],
@@ -373,6 +390,7 @@ app.post("/api/admin/optimize-files", async (req, res) => {
           if (result.embeddings && result.embeddings.length > 0) {
             file.embedding = result.embeddings[0].values;
             updated = true;
+            console.log(`Embedding generated successfully for: ${file.name}`);
           }
         } catch (e) {
           console.error(`Embedding failed for ${file.name}:`, e);
@@ -383,6 +401,11 @@ app.post("/api/admin/optimize-files", async (req, res) => {
         await kv.set(`clinic_file:${id}`, file);
         optimizedCount++;
       }
+      
+      // Safety break to prevent timeout if we've processed too many files in one go
+      // Vercel Hobby has 10s limit, Pro has 60s. 
+      // Let's limit to processing 15 new files per click to be safe.
+      if (optimizedCount >= 15) break;
     }
 
     res.json({ message: `Optimized ${optimizedCount} files`, count: optimizedCount });

@@ -53,7 +53,9 @@ const AdminPanel = ({ files, setFiles, categories, setCategories }: AdminPanelPr
       setModal({ 
         isOpen: true, 
         title: 'สำเร็จ', 
-        message: `ปรับปรุงฐานความรู้เรียบร้อยแล้ว: ${result.message}`, 
+        message: result.count > 0 
+          ? `ปรับปรุงฐานความรู้เรียบร้อยแล้ว: ${result.message}`
+          : `ฐานความรู้เป็นปัจจุบันอยู่แล้วครับ (ไม่มีไฟล์ใหม่ที่ต้องประมวลผล)`, 
         type: 'alert', 
         onConfirm: null 
       });
