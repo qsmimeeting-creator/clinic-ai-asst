@@ -95,18 +95,14 @@ app.get("/api/data", async (req, res) => {
     
     // Fetch each file metadata in parallel
     if (fileIds.length > 0) {
-      const keys = fileIds.map(id => `clinic_file:${id}`);
-      const results = await kv.mget(...keys);
+      const filePromises = fileIds.map(id => kv.get(`clinic_file:${id}`));
+      const results = await Promise.all(filePromises);
       files.push(...results.filter(f => f !== null).map((f: any) => {
-        const { inlineData, content, embedding, ...rest } = f;
+        const { inlineData, content, ...rest } = f;
         if (rest.url && rest.url.startsWith('data:')) {
           rest.url = null; // Strip data URI to save bandwidth, frontend will use /api/files/:id/download
         }
-        return {
-          ...rest,
-          hasContent: !!content,
-          hasEmbedding: !!embedding
-        };
+        return rest;
       }));
     }
 
@@ -169,17 +165,16 @@ app.post("/api/upload", async (req, res) => {
     }) : await mockPut(name, buffer, { contentType: mimeType });
 
     let finalContent = content;
-    // If content is missing (e.g. PDF, Image, Audio, Video uploaded from client without extraction)
-    const isMedia = mimeType && (mimeType.startsWith('image/') || mimeType.startsWith('audio/') || mimeType.startsWith('video/'));
-    if (!finalContent && (mimeType === 'application/pdf' || isMedia) && inlineData) {
+    // If content is missing (e.g. PDF or Image uploaded from client without extraction)
+    const isImage = mimeType && mimeType.startsWith('image/');
+    if (!finalContent && (mimeType === 'application/pdf' || isImage) && inlineData) {
       try {
         const envKeys = (process.env.GEMINI_API_KEY || "").split(',').map(k => k.trim()).filter(k => k !== "");
         if (envKeys.length > 0) {
           const ai = getAI(envKeys[0]);
-          let prompt = "Extract all text from this document accurately. Output only the text content.";
-          if (mimeType.startsWith('image/')) prompt = "Extract all text from this image accurately. If it's a document or contains text, transcribe it. Output only the text content.";
-          if (mimeType.startsWith('audio/')) prompt = "Transcribe this audio accurately. Output only the transcription.";
-          if (mimeType.startsWith('video/')) prompt = "Transcribe the audio in this video and describe any important text shown on screen. Output only the text.";
+          const prompt = mimeType === 'application/pdf' 
+            ? "Extract all text from this document accurately. Output only the text content."
+            : "Extract all text from this image accurately. If it's a document or contains text, transcribe it. Output only the text content.";
           
           const result = await ai.models.generateContent({
             model: 'gemini-3.1-flash-lite-preview',
@@ -363,40 +358,26 @@ app.post("/api/admin/optimize-files", async (req, res) => {
 
       let updated = false;
       
-      // Extract content if missing (especially for PDFs and Media)
-      const isMedia = file.mimeType && (file.mimeType.startsWith('image/') || file.mimeType.startsWith('audio/') || file.mimeType.startsWith('video/'));
-      if (!file.content && (file.mimeType === 'application/pdf' || isMedia)) {
+      // Extract content if missing (especially for PDFs and Images)
+      const isImage = file.mimeType && file.mimeType.startsWith('image/');
+      if (!file.content && (file.mimeType === 'application/pdf' || isImage) && file.inlineData) {
         try {
-          let fileData = file.inlineData;
-          if (!fileData && file.url) {
-            if (file.url.startsWith('data:')) {
-              fileData = file.url.split(',')[1];
-            } else {
-              const resp = await fetch(file.url);
-              const arrayBuffer = await resp.arrayBuffer();
-              fileData = Buffer.from(arrayBuffer).toString('base64');
-            }
-          }
+          const prompt = file.mimeType === 'application/pdf'
+            ? "Extract all text from this document accurately. Output only the text content."
+            : "Extract all text from this image accurately. If it's a document or contains text, transcribe it. Output only the text content.";
 
-          if (fileData) {
-            let prompt = "Extract all text from this document accurately. Output only the text content.";
-            if (file.mimeType.startsWith('image/')) prompt = "Extract all text from this image accurately. If it's a document or contains text, transcribe it. Output only the text content.";
-            if (file.mimeType.startsWith('audio/')) prompt = "Transcribe this audio accurately. Output only the transcription.";
-            if (file.mimeType.startsWith('video/')) prompt = "Transcribe the audio in this video and describe any important text shown on screen. Output only the text.";
-
-            const result = await ai.models.generateContent({
-              model: 'gemini-3.1-flash-lite-preview',
-              contents: {
-                parts: [
-                  { inlineData: { data: fileData, mimeType: file.mimeType } },
-                  { text: prompt }
-                ]
-              }
-            });
-            if (result.text) {
-              file.content = result.text;
-              updated = true;
+          const result = await ai.models.generateContent({
+            model: 'gemini-3.1-flash-lite-preview',
+            contents: {
+              parts: [
+                { inlineData: { data: file.inlineData, mimeType: file.mimeType } },
+                { text: prompt }
+              ]
             }
+          });
+          if (result.text) {
+            file.content = result.text;
+            updated = true;
           }
         } catch (e) {
           console.error(`Text extraction failed for ${file.name}:`, e);
@@ -476,39 +457,36 @@ app.post("/api/chat", async (req, res) => {
     }
 
     // 2. Fetch and Rank Files
-    let allFiles: any[] = [];
-    if (activeFiles.length > 0) {
-      const keys = activeFiles.map((f: any) => `clinic_file:${f.id}`);
-      const fullFiles = await kv.mget(...keys);
+    const allFiles = await Promise.all(activeFiles.map(async (f: any) => {
+      const fullFile: any = await kv.get(`clinic_file:${f.id}`);
+      if (!fullFile) return null;
       
-      allFiles = fullFiles.filter(f => f !== null).map((fullFile: any) => {
-        let score = 0;
-        if (queryEmbedding && fullFile.embedding) {
-          score = cosineSimilarity(queryEmbedding, fullFile.embedding);
-        } else {
-          // Fallback to simple keyword match if embedding fails
-          const q = query.toLowerCase();
-          const keywords = q.split(/\s+/).filter(k => k.length > 1);
-          
-          // Check name
-          const fileName = fullFile.name.toLowerCase();
-          keywords.forEach(kw => {
-            if (fileName.includes(kw)) score += 0.2;
-          });
-          if (fileName.includes(q)) score += 0.5;
+      let score = 0;
+      if (queryEmbedding && fullFile.embedding) {
+        score = cosineSimilarity(queryEmbedding, fullFile.embedding);
+      } else {
+        // Fallback to simple keyword match if embedding fails
+        const q = query.toLowerCase();
+        const keywords = q.split(/\s+/).filter(k => k.length > 1);
+        
+        // Check name
+        const fileName = fullFile.name.toLowerCase();
+        keywords.forEach(kw => {
+          if (fileName.includes(kw)) score += 0.2;
+        });
+        if (fileName.includes(q)) score += 0.5;
 
-          // Check content
-          if (fullFile.content) {
-            const content = fullFile.content.toLowerCase();
-            keywords.forEach(kw => {
-              if (content.includes(kw)) score += 0.1;
-            });
-            if (content.includes(q)) score += 0.3;
-          }
+        // Check content
+        if (fullFile.content) {
+          const content = fullFile.content.toLowerCase();
+          keywords.forEach(kw => {
+            if (content.includes(kw)) score += 0.1;
+          });
+          if (content.includes(q)) score += 0.3;
         }
-        return { ...fullFile, score };
-      });
-    }
+      }
+      return { ...fullFile, score };
+    }));
 
     // Filter and sort by relevance
     const relevantFiles = allFiles
@@ -601,8 +579,6 @@ app.post("/api/chat", async (req, res) => {
               2. อ้างอิงข้อมูลจากเอกสารที่คัดเลือกมาให้เท่านั้น (Context)
               3. หากข้อมูลในเอกสารไม่เพียงพอ ให้ตอบอย่างสุภาพว่า "ขออภัยค่ะ ข้อมูลที่ให้มาไม่เพียงพอที่จะตอบคำถามนี้ รบกวนติดต่อเจ้าหน้าที่คลินิกโดยตรงนะคะ"
               4. ห้ามให้คำแนะนำทางการแพทย์ที่อยู่นอกเหนือจากเอกสารเด็ดขาด
-              5. ข้อมูลสำคัญของคลินิก: คลินิกรับบริการเฉพาะ Walk-in เท่านั้น (ไม่มีการจองคิวล่วงหน้า) ให้แจ้งผู้ป่วยตามนี้หากมีการสอบถามเรื่องการจองคิวหรือนัดหมาย
-              6. เมื่อมีการถามถึงวัคซีนชนิดใดก็ตาม ให้ระบุราคาของวัคซีนชนิดนั้นๆ ในคำตอบด้วยเสมอ (โดยอ้างอิงราคาจากเอกสาร)
               
               รูปแบบการตอบ:
               - ใช้ภาษาไทยที่สุภาพ เป็นธรรมชาติ (มี ค่ะ/ครับ ตามความเหมาะสม)

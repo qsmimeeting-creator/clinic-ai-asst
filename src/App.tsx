@@ -66,6 +66,7 @@ export default function App() {
 
   const [isListening, setIsListening] = useState(false);
   const [isSpeechSupported, setIsSpeechSupported] = useState(false);
+  const [speakingId, setSpeakingId] = useState(null);
   const recognitionRef = useRef(null);
 
   const messagesEndRef = useRef(null);
@@ -101,6 +102,10 @@ export default function App() {
         setIsListening(false);
       };
     }
+
+    return () => {
+      if (window.speechSynthesis) window.speechSynthesis.cancel();
+    };
   }, []);
 
   const handleMicClick = () => {
@@ -113,6 +118,36 @@ export default function App() {
     } else {
       recognitionRef.current.start();
     }
+  };
+
+  const toggleSpeech = (text, id) => {
+    if (!window.speechSynthesis) {
+       setMessages(prev => [...prev, { id: Date.now(), sender: 'bot', type: 'system_error', text: 'เบราว์เซอร์ของคุณไม่รองรับการอ่านออกเสียง (Text-to-Speech) ครับ' }]);
+       return;
+    }
+    
+    window.speechSynthesis.cancel();
+    
+    if (speakingId === id) {
+      setSpeakingId(null);
+      return;
+    }
+    
+    const cleanText = text.replace(/[*_~`#]/g, '');
+    
+    const utterance = new SpeechSynthesisUtterance(cleanText);
+    
+    // ตรวจสอบว่ามีภาษาไทยในข้อความหรือไม่
+    const hasThai = /[ก-๙]/.test(cleanText);
+    utterance.lang = hasThai ? 'th-TH' : 'en-US';
+    
+    utterance.rate = 1.0;
+    
+    utterance.onend = () => setSpeakingId(null);
+    utterance.onerror = () => setSpeakingId(null);
+    
+    setSpeakingId(id);
+    window.speechSynthesis.speak(utterance);
   };
 
   // ฟังก์ชันหลักสำหรับส่งข้อความไปยัง AI
@@ -331,6 +366,8 @@ export default function App() {
                 <MessageItem 
                   key={msg.id} 
                   msg={msg} 
+                  speakingId={speakingId} 
+                  toggleSpeech={toggleSpeech} 
                 />
               ))}
 
