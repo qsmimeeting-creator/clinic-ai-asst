@@ -31,8 +31,8 @@ const hasKVConfig = (process.env.KV_REST_API_URL && process.env.KV_REST_API_TOKE
 
 const hasBlobConfig = !!process.env.BLOB_READ_WRITE_TOKEN;
 
-// Memory store fallback for development without KV
-let memoryStore: Record<string, any> = {
+// In-memory fallback for development without KV
+const memoryStore: Record<string, any> = {
   "clinic_files_ids": [],
   "clinic_categories": [
     { id: "cat_1", name: "ข้อมูลทั่วไป" },
@@ -45,15 +45,8 @@ const kv = hasKVConfig ? createClient({
   token: process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN || "",
 }) : {
   get: async (key: string) => memoryStore[key] || null,
-  set: async (key: string, value: any) => { 
-    memoryStore[key] = value; 
-    return "OK"; 
-  },
-  del: async (key: string) => { 
-    delete memoryStore[key]; 
-    return 1; 
-  },
-  mget: async (...keys: string[]) => keys.map(key => memoryStore[key] || null),
+  set: async (key: string, value: any) => { memoryStore[key] = value; return "OK"; },
+  del: async (key: string) => { delete memoryStore[key]; return 1; },
 };
 
 // Mock Blob put/del
@@ -183,44 +176,24 @@ app.post("/api/upload", async (req, res) => {
         const envKeys = (process.env.GEMINI_API_KEY || "").split(',').map(k => k.trim()).filter(k => k !== "");
         if (envKeys.length > 0) {
           const ai = getAI(envKeys[0]);
-          console.log(`Extracting text during upload for ${name} (${mimeType})...`);
           let prompt = "Extract all text from this document accurately. Output only the text content.";
           if (mimeType.startsWith('image/')) prompt = "Extract all text from this image accurately. If it's a document or contains text, transcribe it. Output only the text content.";
           if (mimeType.startsWith('audio/')) prompt = "Transcribe this audio accurately. Output only the transcription.";
           if (mimeType.startsWith('video/')) prompt = "Transcribe the audio in this video and describe any important text shown on screen. Output only the text.";
           
-          const modelsToTry = ['gemini-3-flash-preview', 'gemini-flash-latest'];
-          for (const modelName of modelsToTry) {
-            try {
-              console.log(`Trying extraction during upload with ${modelName}...`);
-              const result = await ai.models.generateContent({
-                model: modelName,
-                contents: {
-                  parts: [
-                    { inlineData: { data: inlineData, mimeType } },
-                    { text: prompt }
-                  ]
-                },
-                config: {
-                  thinkingConfig: { thinkingLevel: ThinkingLevel.LOW }
-                }
-              });
-              if (result.text && result.text.trim().length > 0) {
-                console.log(`Successfully extracted ${result.text.length} characters during upload for ${name} using ${modelName}`);
-                finalContent = result.text;
-                break;
-              }
-            } catch (modelError) {
-              console.error(`Extraction during upload failed with ${modelName}:`, modelError);
+          const result = await ai.models.generateContent({
+            model: 'gemini-3.1-flash-lite-preview',
+            contents: {
+              parts: [
+                { inlineData: { data: inlineData, mimeType } },
+                { text: prompt }
+              ]
             }
-          }
-          
-          if (!finalContent) {
-            console.warn(`All extraction models failed or returned no text during upload for ${name}`);
-          }
+          });
+          finalContent = result.text || '';
         }
       } catch (e) {
-        console.error('Failed to extract text via AI during upload:', e);
+        console.error('Failed to extract text via AI:', e);
       }
     }
 
@@ -266,16 +239,11 @@ app.post("/api/upload", async (req, res) => {
     fileIds.unshift(fileId);
     await kv.set("clinic_files_ids", fileIds);
     
-    const { inlineData: _, content: __, embedding: ___, ...responseFile } = newFile;
-    const finalResponse = {
-      ...responseFile,
-      hasContent: !!newFile.content,
-      hasEmbedding: !!newFile.embedding
-    };
-    if (finalResponse.url && finalResponse.url.startsWith('data:')) {
-      finalResponse.url = null as any; // Strip data URI
+    const { inlineData: _, content: __, ...responseFile } = newFile;
+    if (responseFile.url && responseFile.url.startsWith('data:')) {
+      responseFile.url = null as any; // Strip data URI
     }
-    res.json(finalResponse);
+    res.json(responseFile);
   } catch (error: any) {
     console.error("Upload Error:", error);
     res.status(500).json({ 
@@ -381,13 +349,12 @@ const chunkText = (text: string, maxChunkSize: number = 4000) => {
 app.post("/api/admin/optimize-files", async (req, res) => {
   try {
     const fileIds: string[] = await kv.get("clinic_files_ids") || [];
-    console.log(`Optimizing ${fileIds.length} files...`);
     if (fileIds.length === 0) return res.json({ message: "No files to optimize", count: 0 });
 
     const envKeys = (process.env.GEMINI_API_KEY || "").split(',').map(k => k.trim()).filter(k => k !== "");
     if (envKeys.length === 0) return res.status(500).json({ error: "Missing API Key" });
     
-    const ai = getAI(envKeys[0]);
+    const ai = new GoogleGenAI({ apiKey: envKeys[0] });
     let optimizedCount = 0;
 
     for (const id of fileIds) {
@@ -398,16 +365,13 @@ app.post("/api/admin/optimize-files", async (req, res) => {
       
       // Extract content if missing (especially for PDFs and Media)
       const isMedia = file.mimeType && (file.mimeType.startsWith('image/') || file.mimeType.startsWith('audio/') || file.mimeType.startsWith('video/'));
-      const needsContent = !file.content || file.content.trim() === "";
-      
-      if (needsContent && (file.mimeType === 'application/pdf' || isMedia)) {
+      if (!file.content && (file.mimeType === 'application/pdf' || isMedia)) {
         try {
           let fileData = file.inlineData;
           if (!fileData && file.url) {
             if (file.url.startsWith('data:')) {
               fileData = file.url.split(',')[1];
             } else {
-              console.log(`Fetching remote file for optimization: ${file.url}`);
               const resp = await fetch(file.url);
               const arrayBuffer = await resp.arrayBuffer();
               fileData = Buffer.from(arrayBuffer).toString('base64');
@@ -415,49 +379,24 @@ app.post("/api/admin/optimize-files", async (req, res) => {
           }
 
           if (fileData) {
-            console.log(`Extracting text from ${file.name} (${file.mimeType})...`);
             let prompt = "Extract all text from this document accurately. Output only the text content.";
             if (file.mimeType.startsWith('image/')) prompt = "Extract all text from this image accurately. If it's a document or contains text, transcribe it. Output only the text content.";
             if (file.mimeType.startsWith('audio/')) prompt = "Transcribe this audio accurately. Output only the transcription.";
             if (file.mimeType.startsWith('video/')) prompt = "Transcribe the audio in this video and describe any important text shown on screen. Output only the text.";
 
-            const modelsToTry = ['gemini-3-flash-preview', 'gemini-flash-latest'];
-            let extractedText = "";
-
-            for (const modelName of modelsToTry) {
-              try {
-                console.log(`Trying extraction with ${modelName}...`);
-                const result = await ai.models.generateContent({
-                  model: modelName,
-                  contents: {
-                    parts: [
-                      { inlineData: { data: fileData, mimeType: file.mimeType } },
-                      { text: prompt }
-                    ]
-                  },
-                  config: {
-                    thinkingConfig: { thinkingLevel: ThinkingLevel.LOW }
-                  }
-                });
-                
-                if (result.text && result.text.trim().length > 0) {
-                  extractedText = result.text;
-                  console.log(`Successfully extracted ${extractedText.length} characters from ${file.name} using ${modelName}`);
-                  break;
-                }
-              } catch (modelError) {
-                console.error(`Extraction failed with ${modelName}:`, modelError);
+            const result = await ai.models.generateContent({
+              model: 'gemini-3.1-flash-lite-preview',
+              contents: {
+                parts: [
+                  { inlineData: { data: fileData, mimeType: file.mimeType } },
+                  { text: prompt }
+                ]
               }
-            }
-            
-            if (extractedText) {
-              file.content = extractedText;
+            });
+            if (result.text) {
+              file.content = result.text;
               updated = true;
-            } else {
-              console.warn(`All extraction models failed or returned no text for ${file.name}`);
             }
-          } else {
-            console.warn(`No file data available for ${file.name}`);
           }
         } catch (e) {
           console.error(`Text extraction failed for ${file.name}:`, e);
@@ -465,10 +404,8 @@ app.post("/api/admin/optimize-files", async (req, res) => {
       }
       
       // Generate embedding if missing
-      const needsEmbedding = !file.embedding;
-      if (needsEmbedding && file.content && file.content.length > 10) {
+      if (!file.embedding && file.content && file.content.length > 10) {
         try {
-          console.log(`Generating embedding for ${file.name}...`);
           const result = await ai.models.embedContent({
             model: 'gemini-embedding-2-preview',
             contents: [file.content.substring(0, 10000)],
@@ -476,7 +413,6 @@ app.post("/api/admin/optimize-files", async (req, res) => {
           if (result.embeddings && result.embeddings.length > 0) {
             file.embedding = result.embeddings[0].values;
             updated = true;
-            console.log(`Successfully generated embedding for ${file.name}`);
           }
         } catch (e) {
           console.error(`Embedding failed for ${file.name}:`, e);
@@ -640,8 +576,8 @@ app.post("/api/chat", async (req, res) => {
     let headersSent = false;
 
     const modelsToTry = [
-      "gemini-3-flash-preview",
       "gemini-3.1-flash-lite-preview",
+      "gemini-3-flash-preview",
       "gemini-flash-latest"
     ];
 
