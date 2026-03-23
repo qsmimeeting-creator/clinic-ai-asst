@@ -94,14 +94,22 @@ app.get("/api/data", async (req, res) => {
       // Limit to last 100 files for performance if the list is huge
       const recentIds = fileIds.slice(0, 100);
       let results: any[] = [];
-      const kvAny = kv as any;
       
-      if (typeof kvAny.mget === 'function') {
-        const keys = recentIds.map(id => `clinic_file:${id}`);
-        results = await kvAny.mget(...keys);
-      } else {
-        const filePromises = recentIds.map(id => kv.get(`clinic_file:${id}`));
-        results = await Promise.all(filePromises);
+      // Fetch in smaller batches to avoid hitting the 10MB request/response limit
+      const batchSize = 10;
+      for (let i = 0; i < recentIds.length; i += batchSize) {
+        const batch = recentIds.slice(i, i + batchSize);
+        const kvAny = kv as any;
+        let batchResults = [];
+        
+        if (typeof kvAny.mget === 'function') {
+          const keys = batch.map(id => `clinic_file:${id}`);
+          batchResults = await kvAny.mget(...keys);
+        } else {
+          const filePromises = batch.map(id => kv.get(`clinic_file:${id}`));
+          batchResults = await Promise.all(filePromises);
+        }
+        results.push(...batchResults);
       }
       
       files.push(...results.filter(f => f !== null).map((f: any) => {
@@ -195,9 +203,11 @@ app.post("/api/upload", async (req, res) => {
     };
     
     // Save metadata and data in parallel
+    // We store metadata in 'clinic_file:' and full data in 'clinic_file_content:'
+    // This keeps the metadata fetch fast and avoids the 10MB limit
     await Promise.all([
-      kv.set(`clinic_file:${fileId}`, { ...fileMeta, ...fileData }), // Keep full object for backward compatibility in some places
-      // We could also store them separately here if we wanted to be even more optimized
+      kv.set(`clinic_file:${fileId}`, fileMeta),
+      kv.set(`clinic_file_content:${fileId}`, { ...fileMeta, ...fileData }),
     ]);
     
     // Use atomic lpush if available, otherwise fallback
@@ -242,6 +252,7 @@ app.delete("/api/files/:id", async (req, res) => {
     }
     
     await kv.del(`clinic_file:${id}`);
+    await kv.del(`clinic_file_content:${id}`);
     
     const fileIds: string[] = await kv.get("clinic_files_ids") || [];
     const updatedFileIds = fileIds.filter(fid => fid !== id);
@@ -261,6 +272,13 @@ app.post("/api/files/:id/status", async (req, res) => {
     if (file) {
       file.status = file.status === 'active' ? 'inactive' : 'active';
       await kv.set(`clinic_file:${id}`, file);
+      
+      // Also update the content key if it exists
+      const fullData: any = await kv.get(`clinic_file_content:${id}`);
+      if (fullData) {
+        fullData.status = file.status;
+        await kv.set(`clinic_file_content:${id}`, fullData);
+      }
     }
     res.json({ success: true });
   } catch (error) {
@@ -272,7 +290,12 @@ app.post("/api/files/:id/status", async (req, res) => {
 app.get("/api/files/:id/download", async (req, res) => {
   try {
     const { id } = req.params;
-    const file: any = await kv.get(`clinic_file:${id}`);
+    // Try to fetch from the new 'content' key first, fallback to metadata key
+    let file: any = await kv.get(`clinic_file_content:${id}`);
+    if (!file) {
+      file = await kv.get(`clinic_file:${id}`);
+    }
+    
     if (!file) {
       return res.status(404).json({ error: "File not found" });
     }
@@ -332,7 +355,11 @@ app.post("/api/admin/optimize-files", async (req, res) => {
     let optimizedCount = 0;
 
     for (const id of fileIds) {
-      const file: any = await kv.get(`clinic_file:${id}`);
+      // Try to fetch from the new 'content' key first, fallback to metadata key
+      let file: any = await kv.get(`clinic_file_content:${id}`);
+      if (!file) {
+        file = await kv.get(`clinic_file:${id}`);
+      }
       if (!file) continue;
 
       let updated = false;
@@ -398,7 +425,12 @@ app.post("/api/admin/optimize-files", async (req, res) => {
       }
 
       if (updated) {
-        await kv.set(`clinic_file:${id}`, file);
+        // Store metadata separately from large content to keep list fetching fast
+        const { content, embedding, inlineData, ...fileMeta } = file;
+        await Promise.all([
+          kv.set(`clinic_file:${id}`, fileMeta),
+          kv.set(`clinic_file_content:${id}`, file),
+        ]);
         optimizedCount++;
       }
       
@@ -462,11 +494,18 @@ app.post("/api/chat", async (req, res) => {
     let allFilesRaw: any[] = [];
     const kvAny = kv as any;
     if (activeFiles.length > 0) {
-      if (typeof kvAny.mget === 'function') {
-        const keys = activeFiles.map((f: any) => `clinic_file:${f.id}`);
-        allFilesRaw = await kvAny.mget(...keys);
-      } else {
-        allFilesRaw = await Promise.all(activeFiles.map((f: any) => kv.get(`clinic_file:${f.id}`)));
+      // Fetch metadata in batches to avoid 10MB limit
+      const batchSize = 10;
+      for (let i = 0; i < activeFiles.length; i += batchSize) {
+        const batch = activeFiles.slice(i, i + batchSize);
+        let batchResults = [];
+        if (typeof kvAny.mget === 'function') {
+          const keys = batch.map((f: any) => `clinic_file:${f.id}`);
+          batchResults = await kvAny.mget(...keys);
+        } else {
+          batchResults = await Promise.all(batch.map((f: any) => kv.get(`clinic_file:${f.id}`)));
+        }
+        allFilesRaw.push(...batchResults);
       }
     }
 
@@ -474,6 +513,7 @@ app.post("/api/chat", async (req, res) => {
       if (!fullFile) return null;
       
       let score = 0;
+      // Note: New files might not have embeddings in the metadata key
       if (queryEmbedding && fullFile.embedding) {
         score = cosineSimilarity(queryEmbedding, fullFile.embedding);
       }
@@ -489,7 +529,7 @@ app.post("/api/chat", async (req, res) => {
       });
       if (fileName.includes(q)) score += 0.3;
 
-      // Check content
+      // Check content if available in metadata (for old files)
       if (fullFile.content) {
         const content = fullFile.content.toLowerCase();
         keywords.forEach(kw => {
@@ -502,10 +542,21 @@ app.post("/api/chat", async (req, res) => {
     });
 
     // Filter and sort by relevance
-    const relevantFiles = allFiles
+    const topMetadata = allFiles
       .filter(f => f !== null)
       .sort((a, b) => b.score - a.score)
       .slice(0, 5); // Take top 5 most relevant files
+
+    // Fetch full content for the top 5 relevant files
+    const relevantFiles = await Promise.all(topMetadata.map(async (meta: any) => {
+      // Try to fetch from the new 'content' key first
+      const fullData: any = await kv.get(`clinic_file_content:${meta.id}`);
+      if (fullData) {
+        return { ...fullData, score: meta.score };
+      }
+      // Fallback to the metadata key (for old files that have everything in one key)
+      return meta;
+    }));
 
     // 3. Prepare context with ONLY relevant files
     let textContext = "ข้อมูลเอกสารที่เกี่ยวข้องของคลินิก:\n";
