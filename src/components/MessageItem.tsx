@@ -18,9 +18,11 @@ interface Message {
 
 interface MessageItemProps {
   msg: Message;
+  speakingId: number | null;
+  toggleSpeech: (text: string, id: number) => void;
 }
 
-const MessageItem = memo(({ msg }: MessageItemProps) => {
+const MessageItem = memo(({ msg, speakingId, toggleSpeech }: MessageItemProps) => {
   const renderBotMessageContent = () => {
     switch (msg.type) {
       case 'welcome':

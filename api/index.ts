@@ -531,6 +531,9 @@ app.post("/api/chat", async (req, res) => {
       }
     }
 
+    const isVaccineQuery = query.toLowerCase().includes("วัคซีน") || query.toLowerCase().includes("vaccine");
+    const priceKeywords = ["ราคา", "บาท", "price", "cost", "ตาราง", "แพ็กเกจ", "package"];
+
     const allFiles = allFilesRaw.map((fullFile: any) => {
       if (!fullFile) return null;
       
@@ -551,6 +554,13 @@ app.post("/api/chat", async (req, res) => {
       });
       if (fileName.includes(q)) score += 0.3;
 
+      // Special boost for price information if it's a vaccine query
+      if (isVaccineQuery) {
+        priceKeywords.forEach(pk => {
+          if (fileName.includes(pk)) score += 0.2;
+        });
+      }
+
       // Check content if available in metadata (for old files)
       if (fullFile.content) {
         const content = fullFile.content.toLowerCase();
@@ -558,6 +568,13 @@ app.post("/api/chat", async (req, res) => {
           if (content.includes(kw)) score += 0.05;
         });
         if (content.includes(q)) score += 0.2;
+        
+        // Special boost for price information in content if it's a vaccine query
+        if (isVaccineQuery) {
+          priceKeywords.forEach(pk => {
+            if (content.includes(pk)) score += 0.1;
+          });
+        }
       }
       
       return { ...fullFile, score };
@@ -567,7 +584,7 @@ app.post("/api/chat", async (req, res) => {
     const topMetadata = allFiles
       .filter(f => f !== null)
       .sort((a, b) => b.score - a.score)
-      .slice(0, 5); // Take top 5 most relevant files
+      .slice(0, isVaccineQuery ? 8 : 5); // Take more files if it's a vaccine query to ensure price info is included
 
     // Fetch full content for the top 5 relevant files
     const relevantFiles = await Promise.all(topMetadata.map(async (meta: any) => {
@@ -667,12 +684,12 @@ app.post("/api/chat", async (req, res) => {
               เป้าหมายหลักของคุณ:
               1. ตอบคำถามผู้ป่วยอย่างถูกต้อง ชัดเจน เข้าใจง่าย และมีความเห็นอกเห็นใจ
               2. อ้างอิงข้อมูลจากเอกสารที่คัดเลือกมาให้ (Context) และข้อมูลสำคัญของคลินิก (System Knowledge)
-              3. เมื่อมีการถามถึงวัคซีนชนิดใด ให้พยายามค้นหาราคาวัคซีนชนิดนั้นจากเอกสารและแจ้งราคาไปด้วยเสมอ
+              3. เมื่อมีการถามถึงวัคซีนชนิดใด ให้พยายามค้นหาราคาวัคซีนชนิดนั้นจากเอกสารและแจ้งราคาไปด้วยเสมอ หากในเอกสารมีตารางราคาหรือแพ็กเกจที่เกี่ยวข้อง ให้สรุปราคามาให้ผู้ใช้ทราบด้วย
               4. หากข้อมูลในเอกสารไม่เพียงพอ ให้ตอบตามข้อมูล System Knowledge หากมี หรือตอบอย่างสุภาพว่า "ขออภัยค่ะ ข้อมูลที่ให้มาไม่เพียงพอที่จะตอบคำถามนี้ รบกวนติดต่อเจ้าหน้าที่คลินิกโดยตรงนะคะ"
               5. ห้ามให้คำแนะนำทางการแพทย์ที่อยู่นอกเหนือจากเอกสารเด็ดขาด
               
               รูปแบบการตอบ:
-              - ใช้ภาษาไทยที่สุภาพ เป็นธรรมชาติ (มี ค่ะ/ครับ ตามความเหมาะสม)
+              - ตอบกลับด้วยภาษาเดียวกับที่ผู้ใช้ถาม (หากถามเป็นภาษาไทย ให้ตอบเป็นภาษาไทยที่สุภาพ มี ค่ะ/ครับ ตามความเหมาะสม, หากถามเป็นภาษาอังกฤษ ให้ตอบเป็นภาษาอังกฤษที่สุภาพและเป็นมืออาชีพ)
               - จัดรูปแบบข้อความให้อ่านง่าย ใช้ Markdown (เช่น **ตัวหนา**, - Bullet points)
               - ระบุชื่อไฟล์ที่ใช้อ้างอิงในคำตอบด้วย (ถ้ามี)
               

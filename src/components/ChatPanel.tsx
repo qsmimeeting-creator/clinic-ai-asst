@@ -229,6 +229,8 @@ export default function ChatPanel({ files }: ChatPanelProps) {
           <MessageItem 
             key={msg.id} 
             msg={msg} 
+            speakingId={null}
+            toggleSpeech={() => {}}
           />
         ))}
 
