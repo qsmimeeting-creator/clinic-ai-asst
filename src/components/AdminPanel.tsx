@@ -34,6 +34,7 @@ const AdminPanel = ({ files, setFiles, categories, setCategories }: AdminPanelPr
   const [isDragging, setIsDragging] = useState(false);
   const [visibleCount, setVisibleCount] = useState(5);
   const [searchTerm, setSearchTerm] = useState('');
+  const [selectedFileIds, setSelectedFileIds] = useState<string[]>([]);
 
   React.useEffect(() => {
     if (!uploadCategory && categories.length > 0) {
@@ -303,6 +304,7 @@ const AdminPanel = ({ files, setFiles, categories, setCategories }: AdminPanelPr
         // Optimistic Update
         const originalFiles = [...files];
         setFiles(files.filter(f => f.id !== id));
+        setSelectedFileIds(prev => prev.filter(selectedId => selectedId !== id));
         closeModal();
 
         try {
@@ -311,6 +313,30 @@ const AdminPanel = ({ files, setFiles, categories, setCategories }: AdminPanelPr
         } catch (error) {
           setFiles(originalFiles);
           setModal({ isOpen: true, title: 'เกิดข้อผิดพลาด', message: 'ไม่สามารถลบไฟล์ได้', type: 'alert', onConfirm: null });
+        }
+      }
+    });
+  };
+
+  const handleBulkDelete = () => {
+    setModal({
+      isOpen: true,
+      title: 'ยืนยันการลบเอกสารหลายรายการ',
+      message: `คุณแน่ใจหรือไม่ที่จะลบไฟล์ที่เลือกจำนวน ${selectedFileIds.length} ไฟล์? (ไม่สามารถกู้คืนได้)`,
+      type: 'confirm',
+      onConfirm: async () => {
+        // Optimistic Update
+        const originalFiles = [...files];
+        setFiles(files.filter(f => !selectedFileIds.includes(f.id)));
+        const idsToDelete = [...selectedFileIds];
+        setSelectedFileIds([]);
+        closeModal();
+
+        try {
+          await Promise.all(idsToDelete.map(id => fetch(`/api/files/${id}`, { method: 'DELETE' })));
+        } catch (error) {
+          setFiles(originalFiles);
+          setModal({ isOpen: true, title: 'เกิดข้อผิดพลาด', message: 'ไม่สามารถลบไฟล์บางส่วนได้', type: 'alert', onConfirm: null });
         }
       }
     });
@@ -338,6 +364,15 @@ const AdminPanel = ({ files, setFiles, categories, setCategories }: AdminPanelPr
     } else {
       setModal({ isOpen: true, title: 'ไม่สามารถดาวน์โหลดได้', message: 'ไม่พบข้อมูลไฟล์สำหรับดาวน์โหลด', type: 'alert', onConfirm: null });
     }
+  };
+
+  const handleBulkDownload = () => {
+    selectedFileIds.forEach((id, index) => {
+      const file = files.find(f => f.id === id);
+      if (file) {
+        setTimeout(() => handleDownload(file), index * 300);
+      }
+    });
   };
 
   const handleAddCategory = async () => {
@@ -578,20 +613,58 @@ const AdminPanel = ({ files, setFiles, categories, setCategories }: AdminPanelPr
         <div className="flex-1 flex flex-col min-w-0">
           <div className="bg-white rounded-xl shadow-sm border border-gray-200 flex flex-col h-full">
             <div className="p-5 border-b border-gray-100 flex flex-col sm:flex-row sm:items-center justify-between shrink-0 gap-4">
-              <h3 className="font-semibold text-gray-800">รายการเอกสารในระบบ (File Management)</h3>
-              <div className="relative flex-1 max-w-xs">
-                <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
-                  <Activity size={14} className="text-gray-400" />
-                </div>
-                <input
-                  type="text"
-                  value={searchTerm}
-                  onChange={(e) => setSearchTerm(e.target.value)}
-                  placeholder="ค้นหาชื่อไฟล์ หรือหมวดหมู่..."
-                  className="block w-full pl-10 pr-3 py-2 border border-gray-300 rounded-lg bg-gray-50 text-sm focus:ring-[#B11226] focus:border-[#B11226] outline-none"
+              <div className="flex items-center space-x-3">
+                <input 
+                  type="checkbox" 
+                  checked={filteredFiles.length > 0 && selectedFileIds.length === filteredFiles.length}
+                  onChange={(e) => {
+                    if (e.target.checked) {
+                      setSelectedFileIds(filteredFiles.map(f => f.id));
+                    } else {
+                      setSelectedFileIds([]);
+                    }
+                  }}
+                  className="w-4 h-4 text-[#B11226] bg-gray-100 border-gray-300 rounded focus:ring-[#B11226]"
+                  title="เลือกทั้งหมด"
                 />
+                <h3 className="font-semibold text-gray-800">รายการเอกสารในระบบ (File Management)</h3>
               </div>
-              <span className="text-xs text-gray-400">แสดง {visibleFiles.length} จาก {filteredFiles.length} รายการ</span>
+              
+              {selectedFileIds.length > 0 ? (
+                <div className="flex items-center space-x-2 flex-1 justify-end">
+                  <span className="text-sm text-gray-600 mr-2">เลือก {selectedFileIds.length} รายการ</span>
+                  <button 
+                    onClick={handleBulkDownload}
+                    className="p-1.5 px-3 text-blue-600 bg-blue-50 hover:bg-blue-100 rounded-lg transition-colors flex items-center text-xs font-medium"
+                    title="ดาวน์โหลดที่เลือก"
+                  >
+                    <Download size={14} className="mr-1" /> ดาวน์โหลด
+                  </button>
+                  <button 
+                    onClick={handleBulkDelete}
+                    className="p-1.5 px-3 text-red-600 bg-red-50 hover:bg-red-100 rounded-lg transition-colors flex items-center text-xs font-medium"
+                    title="ลบที่เลือก"
+                  >
+                    <Trash2 size={14} className="mr-1" /> ลบ
+                  </button>
+                </div>
+              ) : (
+                <div className="relative flex-1 max-w-xs ml-auto">
+                  <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
+                    <Activity size={14} className="text-gray-400" />
+                  </div>
+                  <input
+                    type="text"
+                    value={searchTerm}
+                    onChange={(e) => setSearchTerm(e.target.value)}
+                    placeholder="ค้นหาชื่อไฟล์ หรือหมวดหมู่..."
+                    className="block w-full pl-10 pr-3 py-2 border border-gray-300 rounded-lg bg-gray-50 text-sm focus:ring-[#B11226] focus:border-[#B11226] outline-none"
+                  />
+                </div>
+              )}
+              {selectedFileIds.length === 0 && (
+                <span className="text-xs text-gray-400">แสดง {visibleFiles.length} จาก {filteredFiles.length} รายการ</span>
+              )}
             </div>
             
             <div className="p-4 overflow-y-auto">
@@ -603,9 +676,23 @@ const AdminPanel = ({ files, setFiles, categories, setCategories }: AdminPanelPr
               ) : (
                 <div className="space-y-3">
                   {visibleFiles.map(file => (
-                    <div key={file.id} className={`p-4 rounded-xl border transition-all ${file.status === 'active' ? 'bg-white border-gray-100 shadow-sm' : 'bg-gray-50 border-gray-200 opacity-70'}`}>
+                    <div key={file.id} className={`p-4 rounded-xl border transition-all ${file.status === 'active' ? 'bg-white border-gray-100 shadow-sm' : 'bg-gray-50 border-gray-200 opacity-70'} ${selectedFileIds.includes(file.id) ? 'ring-2 ring-[#B11226]/20 bg-[#fdf2f3]/50' : ''}`}>
                       <div className="flex items-start justify-between">
                         <div className="flex items-start space-x-3">
+                          <div className="mt-1 flex items-center h-full pt-0.5">
+                            <input 
+                              type="checkbox" 
+                              checked={selectedFileIds.includes(file.id)}
+                              onChange={(e) => {
+                                if (e.target.checked) {
+                                  setSelectedFileIds(prev => [...prev, file.id]);
+                                } else {
+                                  setSelectedFileIds(prev => prev.filter(id => id !== file.id));
+                                }
+                              }}
+                              className="w-4 h-4 text-[#B11226] bg-gray-100 border-gray-300 rounded focus:ring-[#B11226]"
+                            />
+                          </div>
                           <div className="mt-1">{getFileIcon(file.name)}</div>
                           <div>
                             <h4 className="font-medium text-gray-900 text-sm sm:text-base break-all">{file.name}</h4>
