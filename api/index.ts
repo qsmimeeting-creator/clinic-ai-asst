@@ -532,6 +532,7 @@ app.post("/api/chat", async (req, res) => {
     }
 
     const isVaccineQuery = query.toLowerCase().includes("วัคซีน") || query.toLowerCase().includes("vaccine");
+    const isClinicInfoQuery = query.toLowerCase().includes("เวลา") || query.toLowerCase().includes("เปิด") || query.toLowerCase().includes("ปิด") || query.toLowerCase().includes("ที่อยู่") || query.toLowerCase().includes("ติดต่อ") || query.toLowerCase().includes("เบอร์");
     const priceKeywords = ["ราคา", "บาท", "price", "cost", "ตาราง", "แพ็กเกจ", "package"];
 
     const allFiles = allFilesRaw.map((fullFile: any) => {
@@ -550,29 +551,34 @@ app.post("/api/chat", async (req, res) => {
       // Check name
       const fileName = fullFile.name.toLowerCase();
       keywords.forEach(kw => {
-        if (fileName.includes(kw)) score += 0.1;
+        if (fileName.includes(kw)) score += 0.15; // Increased weight
       });
-      if (fileName.includes(q)) score += 0.3;
+      if (fileName.includes(q)) score += 0.4; // Increased weight
 
       // Special boost for price information if it's a vaccine query
       if (isVaccineQuery) {
         priceKeywords.forEach(pk => {
-          if (fileName.includes(pk)) score += 0.2;
+          if (fileName.includes(pk)) score += 0.25;
         });
+      }
+
+      // Boost for general clinic info
+      if (isClinicInfoQuery) {
+        if (fileName.includes("เวลา") || fileName.includes("ติดต่อ") || fileName.includes("info")) score += 0.3;
       }
 
       // Check content if available in metadata (for old files)
       if (fullFile.content) {
         const content = fullFile.content.toLowerCase();
         keywords.forEach(kw => {
-          if (content.includes(kw)) score += 0.05;
+          if (content.includes(kw)) score += 0.08;
         });
-        if (content.includes(q)) score += 0.2;
+        if (content.includes(q)) score += 0.25;
         
         // Special boost for price information in content if it's a vaccine query
         if (isVaccineQuery) {
           priceKeywords.forEach(pk => {
-            if (content.includes(pk)) score += 0.1;
+            if (content.includes(pk)) score += 0.15;
           });
         }
       }
@@ -584,7 +590,7 @@ app.post("/api/chat", async (req, res) => {
     const topMetadata = allFiles
       .filter(f => f !== null)
       .sort((a, b) => b.score - a.score)
-      .slice(0, isVaccineQuery ? 8 : 5); // Take more files if it's a vaccine query to ensure price info is included
+      .slice(0, isVaccineQuery ? 10 : 6); // Increased retrieval count
 
     // Fetch full content for the top 5 relevant files
     const relevantFiles = await Promise.all(topMetadata.map(async (meta: any) => {
@@ -675,18 +681,28 @@ app.post("/api/chat", async (req, res) => {
             contents: { parts: requestParts },
             config: {
               thinkingConfig: { thinkingLevel: ThinkingLevel.LOW }, // Phase 1: Reduce thinking latency
-              systemInstruction: `คุณคือผู้ช่วย AI ของคลินิก (เปรียบเสมือนพยาบาลหรือเจ้าหน้าที่คลินิกที่มีความใส่ใจ เป็นมิตร และน่าเชื่อถือ) และมีบทบาทเป็น "แพทย์ผู้เชี่ยวชาญด้านวัคซีนและภูมิคุ้มกันวิทยา"
+              systemInstruction: `คุณคือ "ผู้ช่วยผู้เชี่ยวชาญด้านข้อมูลวัคซีนและภูมิคุ้มกันวิทยา" (Expert Vaccine Information Assistant) ประจำคลินิก
+              
+              บุคลิกภาพและโทนเสียง:
+              - มีความเป็นมืออาชีพสูง (Professional), น่าเชื่อถือ (Authoritative), แต่ยังคงความสุภาพและใส่ใจ (Empathetic)
+              - ใช้ภาษาที่ชัดเจน ถูกต้องตามหลักวิชาการ แต่เข้าใจง่ายสำหรับบุคคลทั่วไป
               
               ข้อมูลสำคัญของคลินิก (System Knowledge):
               - คลินิกรับบริการเฉพาะ Walk-in เท่านั้น (ไม่รับจองคิวล่วงหน้า)
-              - ให้บริการปรึกษาเรื่องวัคซีนและภูมิคุ้มกันวิทยา
+              - ให้บริการปรึกษาเรื่องวัคซีนและภูมิคุ้มกันวิทยาโดยเฉพาะ
               
-              เป้าหมายหลักของคุณ:
-              1. ตอบคำถามผู้ป่วยอย่างถูกต้อง ชัดเจน เข้าใจง่าย และมีความเห็นอกเห็นใจ
-              2. อ้างอิงข้อมูลจากเอกสารที่คัดเลือกมาให้ (Context) และข้อมูลสำคัญของคลินิก (System Knowledge)
-              3. เมื่อมีการถามถึงวัคซีนชนิดใด ให้พยายามค้นหาราคาวัคซีนชนิดนั้นจากเอกสารและแจ้งราคาไปด้วยเสมอ หากในเอกสารมีตารางราคาหรือแพ็กเกจที่เกี่ยวข้อง ให้สรุปราคามาให้ผู้ใช้ทราบด้วย
-              4. หากข้อมูลในเอกสารไม่เพียงพอ ให้ตอบตามข้อมูล System Knowledge หากมี หรือตอบอย่างสุภาพว่า "ขออภัยค่ะ ข้อมูลที่ให้มาไม่เพียงพอที่จะตอบคำถามนี้ รบกวนติดต่อเจ้าหน้าที่คลินิกโดยตรงนะคะ"
-              5. ห้ามให้คำแนะนำทางการแพทย์ที่อยู่นอกเหนือจากเอกสารเด็ดขาด
+              ขอบเขตและเป้าหมายหลัก (Boundaries & Goals):
+              1. **การตอบคำถามต้องอยู่บนพื้นฐานของหลักฐาน (Evidence-based)**: อ้างอิงข้อมูลจากเอกสารที่คัดเลือกมาให้ (Context) และข้อมูลสำคัญของคลินิก (System Knowledge) เท่านั้น
+              2. **ห้ามใช้ความรู้ทั่วไปของ AI (General Knowledge) ในการตอบคำถามเด็ดขาด**: คุณต้องทำหน้าที่เป็น "ผู้ถ่ายทอดข้อมูลจากเอกสาร" อย่างแม่นยำ หากในเอกสารไม่มีข้อมูลนั้น ให้แจ้งผู้ใช้ตามตรงว่าไม่มีข้อมูลในระบบ
+              3. **การให้ข้อมูลวัคซีน**: เมื่อตอบคำถามเกี่ยวกับวัคซีน หากข้อมูลมีในเอกสาร ให้ครอบคลุมประเด็นดังนี้ (ถ้ามี):
+                 - สรรพคุณหรือประโยชน์ของวัคซีน
+                 - กลุ่มเป้าหมายหรือผู้ที่ควรได้รับ
+                 - ตารางการฉีด (Schedule)
+                 - ราคาและแพ็กเกจ (Price & Packages) - **ต้องแจ้งเสมอหากมีข้อมูล**
+                 - ผลข้างเคียงที่อาจเกิดขึ้น
+              4. **การจัดการข้อมูลที่ขาดหาย**: หากข้อมูลในเอกสารไม่เพียงพอ ให้ตอบอย่างสุภาพว่า "ขออภัยค่ะ ข้อมูลที่ให้มาไม่เพียงพอที่จะตอบคำถามนี้ รบกวนติดต่อเจ้าหน้าที่คลินิกโดยตรงนะคะ" **ห้ามคาดเดาหรือคิดคำตอบเอง**
+              5. **ความขัดแย้งของข้อมูล**: หากข้อมูลในเอกสารหลายฉบับขัดแย้งกัน ให้ยึดตามเอกสารที่มีความเกี่ยวข้องสูงสุด (Score สูงสุด) หรือเอกสารที่ดูเป็นปัจจุบันที่สุด และระบุในคำตอบว่า "ข้อมูลจากเอกสารบางฉบับอาจมีความแตกต่างกัน"
+              6. **ห้ามให้คำแนะนำทางการแพทย์ที่อยู่นอกเหนือจากเอกสารเด็ดขาด**: หากผู้ป่วยมีอาการผิดปกติหรือต้องการการวินิจฉัย ให้แนะนำให้พบแพทย์ที่คลินิกทันที
               
               รูปแบบการตอบ:
               - ตอบกลับด้วยภาษาเดียวกับที่ผู้ใช้ถาม (หากถามเป็นภาษาไทย ให้ตอบเป็นภาษาไทยที่สุภาพ มี ค่ะ/ครับ ตามความเหมาะสม, หากถามเป็นภาษาอังกฤษ ให้ตอบเป็นภาษาอังกฤษที่สุภาพและเป็นมืออาชีพ)
@@ -698,7 +714,7 @@ app.post("/api/chat", async (req, res) => {
                 "answer": "คำตอบของคุณที่จัดรูปแบบด้วย Markdown",
                 "citations": [{"file_name": "ชื่อไฟล์อ้างอิง 1", "locator": "หน้า/หัวข้อ"}]
               }`,
-              temperature: 0.1
+              temperature: 0.0
             }
           });
 
