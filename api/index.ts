@@ -532,7 +532,6 @@ app.post("/api/chat", async (req, res) => {
     }
 
     const isVaccineQuery = query.toLowerCase().includes("วัคซีน") || query.toLowerCase().includes("vaccine");
-    const isClinicInfoQuery = query.toLowerCase().includes("เวลา") || query.toLowerCase().includes("เปิด") || query.toLowerCase().includes("ปิด") || query.toLowerCase().includes("ที่อยู่") || query.toLowerCase().includes("ติดต่อ") || query.toLowerCase().includes("เบอร์");
     const priceKeywords = ["ราคา", "บาท", "price", "cost", "ตาราง", "แพ็กเกจ", "package"];
 
     const allFiles = allFilesRaw.map((fullFile: any) => {
@@ -551,34 +550,29 @@ app.post("/api/chat", async (req, res) => {
       // Check name
       const fileName = fullFile.name.toLowerCase();
       keywords.forEach(kw => {
-        if (fileName.includes(kw)) score += 0.15; // Increased weight
+        if (fileName.includes(kw)) score += 0.1;
       });
-      if (fileName.includes(q)) score += 0.4; // Increased weight
+      if (fileName.includes(q)) score += 0.3;
 
       // Special boost for price information if it's a vaccine query
       if (isVaccineQuery) {
         priceKeywords.forEach(pk => {
-          if (fileName.includes(pk)) score += 0.25;
+          if (fileName.includes(pk)) score += 0.2;
         });
-      }
-
-      // Boost for general clinic info
-      if (isClinicInfoQuery) {
-        if (fileName.includes("เวลา") || fileName.includes("ติดต่อ") || fileName.includes("info")) score += 0.3;
       }
 
       // Check content if available in metadata (for old files)
       if (fullFile.content) {
         const content = fullFile.content.toLowerCase();
         keywords.forEach(kw => {
-          if (content.includes(kw)) score += 0.08;
+          if (content.includes(kw)) score += 0.05;
         });
-        if (content.includes(q)) score += 0.25;
+        if (content.includes(q)) score += 0.2;
         
         // Special boost for price information in content if it's a vaccine query
         if (isVaccineQuery) {
           priceKeywords.forEach(pk => {
-            if (content.includes(pk)) score += 0.15;
+            if (content.includes(pk)) score += 0.1;
           });
         }
       }
@@ -590,7 +584,7 @@ app.post("/api/chat", async (req, res) => {
     const topMetadata = allFiles
       .filter(f => f !== null)
       .sort((a, b) => b.score - a.score)
-      .slice(0, isVaccineQuery ? 10 : 6); // Increased retrieval count
+      .slice(0, isVaccineQuery ? 8 : 5); // Take more files if it's a vaccine query to ensure price info is included
 
     // Fetch full content for the top 5 relevant files
     const relevantFiles = await Promise.all(topMetadata.map(async (meta: any) => {
@@ -681,38 +675,33 @@ app.post("/api/chat", async (req, res) => {
             contents: { parts: requestParts },
             config: {
               thinkingConfig: { thinkingLevel: ThinkingLevel.LOW }, // Phase 1: Reduce thinking latency
-              systemInstruction: `คุณคือ "ผู้ช่วยผู้เชี่ยวชาญด้านข้อมูลวัคซีนและภูมิคุ้มกันวิทยา" (Expert Vaccine Information Assistant) ประจำคลินิก
+              systemInstruction: `คุณคือ "ผู้ช่วยผู้เชี่ยวชาญด้านวัคซีนและภูมิคุ้มกันวิทยา" (Expert Vaccine & Immunology Assistant) ประจำคลินิก
               
-              บุคลิกภาพและโทนเสียง:
-              - มีความเป็นมืออาชีพสูง (Professional), น่าเชื่อถือ (Authoritative), แต่ยังคงความสุภาพและใส่ใจ (Empathetic)
-              - ใช้ภาษาที่ชัดเจน ถูกต้องตามหลักวิชาการ แต่เข้าใจง่ายสำหรับบุคคลทั่วไป
+              บุคลิกและโทนเสียง (Persona & Tone):
+              - มีความเป็นมืออาชีพสูง (Professional), แม่นยำ (Precise), และน่าเชื่อถือ (Authoritative)
+              - ใช้ภาษาที่สุภาพ เป็นทางการแต่เข้าใจง่าย (Empathetic & Clear)
+              - ให้ข้อมูลเชิงลึกเสมือนผู้เชี่ยวชาญ แต่ต้องอยู่ภายใต้ข้อมูลที่มีเท่านั้น
               
-              ข้อมูลสำคัญของคลินิก (System Knowledge):
-              - คลินิกรับบริการเฉพาะ Walk-in เท่านั้น (ไม่รับจองคิวล่วงหน้า)
-              - ให้บริการปรึกษาเรื่องวัคซีนและภูมิคุ้มกันวิทยาโดยเฉพาะ
+              กฎเหล็ก (Strict Rules - Mandatory):
+              1. ห้ามคิดคำตอบเอง (Strictly No Hallucination): ข้อมูลทุกอย่างต้องมีหลักฐานปรากฏใน "เอกสารที่เกี่ยวข้องของคลินิก" (Context) เท่านั้น
+              2. ห้ามใช้ความรู้ทั่วไปของ AI: แม้คุณจะมีความรู้เรื่องวัคซีนจากฐานข้อมูลเดิม แต่ห้ามนำมาใช้ตอบหากไม่มีระบุไว้ในเอกสารที่แนบมาในครั้งนี้
+              3. หากไม่มีข้อมูลในเอกสาร: ให้ตอบอย่างเป็นมืออาชีพว่า "จากการตรวจสอบฐานข้อมูลเอกสารทางการของคลินิกในขณะนี้ ไม่พบรายละเอียดเกี่ยวกับเรื่องดังกล่าว เพื่อข้อมูลที่ถูกต้องและเป็นปัจจุบันที่สุด แนะนำให้ท่านปรึกษาเจ้าหน้าที่หรือแพทย์ที่คลินิกโดยตรงค่ะ"
+              4. ห้ามคาดเดา: โดยเฉพาะเรื่องราคา (Price), ตารางนัด (Schedule), และข้อบ่งชี้ทางการแพทย์ (Medical Indications) ที่ไม่มีระบุไว้ชัดเจน
               
-              ขอบเขตและเป้าหมายหลัก (Boundaries & Goals):
-              1. **การตอบคำถามต้องอยู่บนพื้นฐานของหลักฐาน (Evidence-based)**: อ้างอิงข้อมูลจากเอกสารที่คัดเลือกมาให้ (Context) และข้อมูลสำคัญของคลินิก (System Knowledge) เท่านั้น
-              2. **ห้ามใช้ความรู้ทั่วไปของ AI (General Knowledge) ในการตอบคำถามเด็ดขาด**: คุณต้องทำหน้าที่เป็น "ผู้ถ่ายทอดข้อมูลจากเอกสาร" อย่างแม่นยำ หากในเอกสารไม่มีข้อมูลนั้น ให้แจ้งผู้ใช้ตามตรงว่าไม่มีข้อมูลในระบบ
-              3. **การให้ข้อมูลวัคซีน**: เมื่อตอบคำถามเกี่ยวกับวัคซีน หากข้อมูลมีในเอกสาร ให้ครอบคลุมประเด็นดังนี้ (ถ้ามี):
-                 - สรรพคุณหรือประโยชน์ของวัคซีน
-                 - กลุ่มเป้าหมายหรือผู้ที่ควรได้รับ
-                 - ตารางการฉีด (Schedule)
-                 - ราคาและแพ็กเกจ (Price & Packages) - **ต้องแจ้งเสมอหากมีข้อมูล**
-                 - ผลข้างเคียงที่อาจเกิดขึ้น
-              4. **การจัดการข้อมูลที่ขาดหาย**: หากข้อมูลในเอกสารไม่เพียงพอ ให้ตอบอย่างสุภาพว่า "ขออภัยค่ะ ข้อมูลที่ให้มาไม่เพียงพอที่จะตอบคำถามนี้ รบกวนติดต่อเจ้าหน้าที่คลินิกโดยตรงนะคะ" **ห้ามคาดเดาหรือคิดคำตอบเอง**
-              5. **ความขัดแย้งของข้อมูล**: หากข้อมูลในเอกสารหลายฉบับขัดแย้งกัน ให้ยึดตามเอกสารที่มีความเกี่ยวข้องสูงสุด (Score สูงสุด) หรือเอกสารที่ดูเป็นปัจจุบันที่สุด และระบุในคำตอบว่า "ข้อมูลจากเอกสารบางฉบับอาจมีความแตกต่างกัน"
-              6. **ห้ามให้คำแนะนำทางการแพทย์ที่อยู่นอกเหนือจากเอกสารเด็ดขาด**: หากผู้ป่วยมีอาการผิดปกติหรือต้องการการวินิจฉัย ให้แนะนำให้พบแพทย์ที่คลินิกทันที
+              ข้อมูลพื้นฐานของคลินิก (Core Knowledge):
+              - รูปแบบบริการ: รับเฉพาะ Walk-in เท่านั้น (No Appointment Required)
+              - ขอบเขตบริการ: ให้บริการปรึกษาและฉีดวัคซีน รวมถึงงานด้านภูมิคุ้มกันวิทยา
               
-              รูปแบบการตอบ:
-              - ตอบกลับด้วยภาษาเดียวกับที่ผู้ใช้ถาม (หากถามเป็นภาษาไทย ให้ตอบเป็นภาษาไทยที่สุภาพ มี ค่ะ/ครับ ตามความเหมาะสม, หากถามเป็นภาษาอังกฤษ ให้ตอบเป็นภาษาอังกฤษที่สุภาพและเป็นมืออาชีพ)
-              - จัดรูปแบบข้อความให้อ่านง่าย ใช้ Markdown (เช่น **ตัวหนา**, - Bullet points)
-              - ระบุชื่อไฟล์ที่ใช้อ้างอิงในคำตอบด้วย (ถ้ามี)
+              แนวทางการตอบ (Response Guidelines):
+              1. วิเคราะห์คำถามอย่างละเอียดและค้นหาข้อมูลที่ตรงประเด็นที่สุดจากเอกสาร
+              2. หากถามถึงวัคซีน: ต้องระบุชื่อวัคซีน, สรรพคุณ, ราคา (ถ้ามี), และข้อแนะนำเบื้องต้นตามที่เอกสารระบุ
+              3. การอ้างอิง: ต้องระบุชื่อไฟล์อ้างอิงทุกครั้งเพื่อให้ตรวจสอบย้อนกลับได้
+              4. รูปแบบ: ใช้ Markdown เพื่อความเป็นระเบียบ (หัวข้อ, ตัวหนา, รายการ)
               
               สำคัญมาก: ตอบกลับในรูปแบบ JSON ที่มีโครงสร้างดังนี้เท่านั้น:
               {
-                "answer": "คำตอบของคุณที่จัดรูปแบบด้วย Markdown",
-                "citations": [{"file_name": "ชื่อไฟล์อ้างอิง 1", "locator": "หน้า/หัวข้อ"}]
+                "answer": "คำตอบเชิงลึกแบบผู้เชี่ยวชาญในรูปแบบ Markdown",
+                "citations": [{"file_name": "ชื่อไฟล์อ้างอิง", "locator": "หัวข้อ/หน้า"}]
               }`,
               temperature: 0.0
             }

@@ -41,44 +41,6 @@ const AdminPanel = ({ files, setFiles, categories, setCategories }: AdminPanelPr
     }
   }, [categories, uploadCategory]);
 
-  const [isOptimizing, setIsOptimizing] = useState(false);
-
-  const handleOptimize = async () => {
-    setIsOptimizing(true);
-    try {
-      const response = await fetch('/api/admin/optimize-files', { method: 'POST' });
-      const result = await response.json();
-      if (!response.ok) throw new Error(result.message || 'Optimization failed');
-      
-      setModal({ 
-        isOpen: true, 
-        title: 'สำเร็จ', 
-        message: result.count > 0 
-          ? `ปรับปรุงฐานความรู้เรียบร้อยแล้ว: ${result.message}`
-          : `ฐานความรู้เป็นปัจจุบันอยู่แล้วครับ (ไม่มีไฟล์ใหม่ที่ต้องประมวลผล)`, 
-        type: 'alert', 
-        onConfirm: null 
-      });
-      
-      // Refresh data
-      const dataResponse = await fetch('/api/data');
-      const data = await dataResponse.json();
-      if (dataResponse.ok) {
-        setFiles(data.files || []);
-      }
-    } catch (error: any) {
-      setModal({ 
-        isOpen: true, 
-        title: 'เกิดข้อผิดพลาด', 
-        message: `ไม่สามารถปรับปรุงฐานความรู้ได้: ${error.message}`, 
-        type: 'alert', 
-        onConfirm: null 
-      });
-    } finally {
-      setIsOptimizing(false);
-    }
-  };
-
   const getCategoryName = (id: string) => {
     const cat = categories.find(c => c.id === id);
     return cat ? cat.name : 'ทั่วไป';
@@ -260,7 +222,7 @@ const AdminPanel = ({ files, setFiles, categories, setCategories }: AdminPanelPr
         setModal({ 
           isOpen: true, 
           title: 'อัปโหลดสำเร็จ', 
-          message: `อัปโหลดสำเร็จ ${successCount} ไฟล์เรียบร้อยแล้วครับ กรุณากดปุ่ม "ปรับปรุงฐานความรู้ (Optimize)" เพื่อให้ AI สามารถอ่านข้อมูลจากไฟล์ใหม่เหล่านี้ได้แม่นยำที่สุดครับ`, 
+          message: `อัปโหลดสำเร็จ ${successCount} ไฟล์เรียบร้อยแล้วครับ ระบบกำลังประมวลผลข้อมูล (Extract Text & Embedding) ให้อัตโนมัติเพื่อให้ AI สามารถนำข้อมูลไปตอบได้ทันทีครับ`, 
           type: 'alert',
           onConfirm: null
         });
@@ -440,26 +402,17 @@ const AdminPanel = ({ files, setFiles, categories, setCategories }: AdminPanelPr
           </div>
         </div>
         <div className="bg-white p-4 rounded-xl shadow-sm border border-gray-100 flex flex-col justify-center">
-          <div className="flex items-center mb-2">
-            <div className="bg-purple-100 p-3 rounded-full mr-4 text-purple-600"><Activity size={20} /></div>
+          <div className="flex items-center">
+            <div className="bg-green-100 p-3 rounded-full mr-4 text-green-600"><Activity size={20} /></div>
             <div>
-              <p className="text-xs text-gray-500 font-medium">สถานะ Vector DB</p>
-              <p className="text-xl font-bold text-green-600 text-sm mt-1">Ready (Indexed)</p>
+              <p className="text-xs text-gray-500 font-medium">ระบบประมวลผล AI</p>
+              <p className="text-sm font-bold text-green-600 mt-1 flex items-center">
+                <span className="w-2 h-2 bg-green-500 rounded-full animate-pulse mr-2"></span>
+                ทำงานอัตโนมัติ (Auto-Optimize)
+              </p>
+              <p className="text-[10px] text-gray-400 mt-0.5 italic">*ประมวลผลทันทีเมื่ออัปโหลดไฟล์ใหม่</p>
             </div>
           </div>
-          <button 
-            onClick={handleOptimize}
-            disabled={isOptimizing}
-            className={`w-full py-1.5 px-3 rounded-lg text-xs font-medium transition-colors flex items-center justify-center ${
-              isOptimizing ? 'bg-gray-100 text-gray-400 cursor-not-allowed' : 'bg-purple-50 text-purple-700 hover:bg-purple-100 border border-purple-200'
-            }`}
-          >
-            {isOptimizing ? (
-              <><div className="w-3 h-3 border-2 border-purple-600 border-t-transparent rounded-full animate-spin mr-2"></div> กำลังปรับปรุง...</>
-            ) : (
-              <><Activity size={14} className="mr-1.5" /> ปรับปรุงฐานความรู้ (Optimize)</>
-            )}
-          </button>
         </div>
       </div>
 
