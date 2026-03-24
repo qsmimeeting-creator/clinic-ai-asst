@@ -27,6 +27,49 @@ function cosineSimilarity(vecA: number[], vecB: number[]) {
   return dotProduct / denominator;
 }
 
+const getContentPreview = (content?: string | null, maxLength: number = 400) => {
+  if (!content) return null;
+  return content.replace(/\s+/g, " ").trim().slice(0, maxLength);
+};
+
+const getQueryKeywords = (query: string) => {
+  return Array.from(
+    new Set(
+      query
+        .toLowerCase()
+        .split(/[\s,.;:!?()[\]{}"'“”‘’/\|+-]+/)
+        .map((item) => item.trim())
+        .filter((item) => item.length >= 2)
+    )
+  );
+};
+
+const buildRelevantSnippet = (content: string, query: string, maxLength: number = 2200) => {
+  if (!content) return "";
+  const normalized = content.replace(/\r/g, "");
+  if (normalized.length <= maxLength) return normalized;
+
+  const keywords = getQueryKeywords(query);
+  const lower = normalized.toLowerCase();
+
+  let bestIndex = -1;
+  for (const keyword of keywords) {
+    const idx = lower.indexOf(keyword);
+    if (idx !== -1) {
+      bestIndex = idx;
+      break;
+    }
+  }
+
+  if (bestIndex === -1) {
+    return normalized.slice(0, maxLength);
+  }
+
+  const start = Math.max(0, bestIndex - 500);
+  const end = Math.min(normalized.length, start + maxLength);
+  return normalized.slice(start, end);
+};
+
 // Initialize KV with fallback for different environment variable names
 const hasKVConfig = (process.env.KV_REST_API_URL && process.env.KV_REST_API_TOKEN) || 
                    (process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_REST_TOKEN) ||
@@ -201,6 +244,10 @@ app.post("/api/upload", async (req, res) => {
     // 2. Save metadata to individual KV key and update ID list
     const fileId = `file_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
     
+    const initialContent = typeof content === "string" ? content.trim() : "";
+    const processingStatus = initialContent ? "ready" : "pending";
+    const contentUpdatedAt = initialContent ? new Date().toISOString() : null;
+
     // Store metadata separately from large content to keep list fetching fast
     const fileMeta = {
       id: fileId,
@@ -210,14 +257,24 @@ app.post("/api/upload", async (req, res) => {
       date,
       size,
       url: blob.url,
-      mimeType
+      mimeType,
+      processingStatus,
+      hasContent: Boolean(initialContent),
+      hasEmbedding: false,
+      contentPreview: getContentPreview(initialContent),
+      contentUpdatedAt,
     };
 
     const fileData = {
       id: fileId,
-      content: content || null,
+      content: initialContent || null,
       embedding: null,
-      inlineData: inlineData.length < 500000 ? inlineData : null
+      inlineData: inlineData.length < 500000 ? inlineData : null,
+      processingStatus,
+      hasContent: Boolean(initialContent),
+      hasEmbedding: false,
+      contentPreview: getContentPreview(initialContent),
+      contentUpdatedAt,
     };
     
     // Save metadata and data in parallel
@@ -366,17 +423,34 @@ const chunkText = (text: string, maxChunkSize: number = 4000) => {
 // Optimize all files (generate missing embeddings)
 app.post("/api/admin/optimize-files", async (req, res) => {
   try {
-    const fileIds: string[] = await kv.get("clinic_files_ids") || [];
-    if (fileIds.length === 0) return res.json({ message: "No files to optimize", count: 0 });
+    const requestedIds = Array.isArray(req.body?.fileIds)
+      ? req.body.fileIds.filter((id: unknown) => typeof id === "string" && id.trim())
+      : null;
 
-    const envKeys = (process.env.GEMINI_API_KEY || "").split(',').map(k => k.trim()).filter(k => k !== "");
-    if (envKeys.length === 0) return res.status(500).json({ error: "Missing API Key" });
-    
+    const fileIds: string[] =
+      requestedIds && requestedIds.length > 0
+        ? requestedIds
+        : (await kv.get("clinic_files_ids")) || [];
+
+    if (fileIds.length === 0) {
+      return res.json({ message: "No files to optimize", count: 0, optimizedIds: [] });
+    }
+
+    const envKeys = (process.env.GEMINI_API_KEY || "")
+      .split(",")
+      .map((k) => k.trim())
+      .filter((k) => k !== "");
+
+    if (envKeys.length === 0) {
+      return res.status(500).json({ error: "Missing API Key" });
+    }
+
     const ai = new GoogleGenAI({ apiKey: envKeys[0] });
     let optimizedCount = 0;
+    const optimizedIds: string[] = [];
+    const failedIds: string[] = [];
 
     for (const id of fileIds) {
-      // Try to fetch from the new 'content' key first, fallback to metadata key
       let file: any = await kv.get(`clinic_file_content:${id}`);
       if (!file) {
         file = await kv.get(`clinic_file:${id}`);
@@ -384,85 +458,127 @@ app.post("/api/admin/optimize-files", async (req, res) => {
       if (!file) continue;
 
       let updated = false;
-      
-      // Extract content if missing (especially for PDFs and Images)
-      const isImage = file.mimeType && file.mimeType.startsWith('image/');
-      const isPDF = file.mimeType === 'application/pdf';
-      
+      let extractionFailed = false;
+      let embeddingFailed = false;
+
+      const isImage = file.mimeType && file.mimeType.startsWith("image/");
+      const isPDF = file.mimeType === "application/pdf";
+
+      // Extract text if missing (PDF / Image)
       if (!file.content && (isPDF || isImage)) {
         try {
           let fileData = file.inlineData;
-          
-          // If inlineData is missing (due to size limits), fetch from URL
+
           if (!fileData && file.url) {
             console.log(`Fetching file data from URL for optimization: ${file.name}`);
             const resp = await fetch(file.url);
             if (resp.ok) {
               const arrayBuffer = await resp.arrayBuffer();
-              fileData = Buffer.from(arrayBuffer).toString('base64');
+              fileData = Buffer.from(arrayBuffer).toString("base64");
             }
           }
-          
+
           if (fileData) {
             const prompt = isPDF
-              ? "Extract all text from this document accurately. Output only the text content."
+              ? "Extract all text from this document accurately. Output only the text content. Preserve prices, vaccine names, tables, schedules, and headings when possible."
               : "Extract all text from this image accurately. If it's a document or contains text, transcribe it. Output only the text content.";
 
             const result = await ai.models.generateContent({
-              model: 'gemini-3-flash-preview',
+              model: "gemini-3-flash-preview",
               contents: {
                 parts: [
                   { inlineData: { data: fileData, mimeType: file.mimeType } },
-                  { text: prompt }
-                ]
-              }
+                  { text: prompt },
+                ],
+              },
             });
+
             if (result.text) {
               file.content = result.text;
+              file.contentUpdatedAt = new Date().toISOString();
               updated = true;
             }
           }
         } catch (e) {
+          extractionFailed = true;
           console.error(`Text extraction failed for ${file.name}:`, e);
         }
       }
-      
+
       // Generate embedding if missing
       if (!file.embedding && file.content && file.content.length > 5) {
         try {
           console.log(`Generating embedding for: ${file.name}`);
+          const chunks = chunkText(file.content, 6000).slice(0, 3);
+          const embeddingInput = chunks.join("\n\n");
+
           const result = await ai.models.embedContent({
-            model: 'gemini-embedding-2-preview',
-            contents: [file.content.substring(0, 10000)],
+            model: "gemini-embedding-2-preview",
+            contents: [embeddingInput],
           });
+
           if (result.embeddings && result.embeddings.length > 0) {
             file.embedding = result.embeddings[0].values;
             updated = true;
             console.log(`Embedding generated successfully for: ${file.name}`);
           }
         } catch (e) {
+          embeddingFailed = true;
           console.error(`Embedding failed for ${file.name}:`, e);
         }
       }
 
-      if (updated) {
-        // Store metadata separately from large content to keep list fetching fast
-        const { content, embedding, inlineData, ...fileMeta } = file;
-        await Promise.all([
-          kv.set(`clinic_file:${id}`, fileMeta),
-          kv.set(`clinic_file_content:${id}`, file),
-        ]);
+      const hasContent = Boolean(file.content && String(file.content).trim().length > 0);
+      const hasEmbedding = Boolean(file.embedding && Array.isArray(file.embedding) && file.embedding.length > 0);
+
+      const processingStatus =
+        extractionFailed || embeddingFailed
+          ? hasContent
+            ? "partial"
+            : "failed"
+          : hasContent && hasEmbedding
+            ? "ready"
+            : hasContent
+              ? "content_only"
+              : "pending";
+
+      file.hasContent = hasContent;
+      file.hasEmbedding = hasEmbedding;
+      file.processingStatus = processingStatus;
+      file.contentPreview = getContentPreview(file.content);
+      file.contentUpdatedAt = file.contentUpdatedAt || null;
+
+      const { content, embedding, inlineData, ...fileMeta } = file;
+      fileMeta.hasContent = hasContent;
+      fileMeta.hasEmbedding = hasEmbedding;
+      fileMeta.processingStatus = processingStatus;
+      fileMeta.contentPreview = getContentPreview(content);
+      fileMeta.contentUpdatedAt = file.contentUpdatedAt || null;
+
+      await Promise.all([
+        kv.set(`clinic_file:${id}`, fileMeta),
+        kv.set(`clinic_file_content:${id}`, file),
+      ]);
+
+      if (updated || requestedIds) {
         optimizedCount++;
+        optimizedIds.push(id);
       }
-      
-      // Safety break to prevent timeout if we've processed too many files in one go
-      // Vercel Hobby has 10s limit, Pro has 60s. 
-      // Let's limit to processing 15 new files per click to be safe.
-      if (optimizedCount >= 15) break;
+
+      if (processingStatus === "failed") {
+        failedIds.push(id);
+      }
+
+      if (!requestedIds && optimizedCount >= 15) break;
     }
 
-    metadataCache = null; // Invalidate cache
-    res.json({ message: `Optimized ${optimizedCount} files`, count: optimizedCount });
+    metadataCache = null;
+    res.json({
+      message: `Optimized ${optimizedCount} files`,
+      count: optimizedCount,
+      optimizedIds,
+      failedIds,
+    });
   } catch (error: any) {
     console.error("Optimize Error:", error);
     res.status(500).json({ error: "Optimize Error", message: error.message });
@@ -512,96 +628,77 @@ app.post("/api/chat", async (req, res) => {
       console.error("Query embedding failed:", e);
     }
 
-    // 2. Fetch and Rank Files
+    // 2. Fetch and Rank Files (IMPORTANT: use full content key, not metadata-only key)
     let allFilesRaw: any[] = [];
     const kvAny = kv as any;
+
     if (activeFiles.length > 0) {
-      // Fetch metadata in batches to avoid 10MB limit
       const batchSize = 10;
       for (let i = 0; i < activeFiles.length; i += batchSize) {
         const batch = activeFiles.slice(i, i + batchSize);
         let batchResults = [];
-        if (typeof kvAny.mget === 'function') {
-          const keys = batch.map((f: any) => `clinic_file:${f.id}`);
+
+        if (typeof kvAny.mget === "function") {
+          const keys = batch.map((f: any) => `clinic_file_content:${f.id}`);
           batchResults = await kvAny.mget(...keys);
         } else {
-          batchResults = await Promise.all(batch.map((f: any) => kv.get(`clinic_file:${f.id}`)));
+          batchResults = await Promise.all(
+            batch.map((f: any) => kv.get(`clinic_file_content:${f.id}`))
+          );
         }
+
         allFilesRaw.push(...batchResults);
       }
     }
 
-    const isVaccineQuery = query.toLowerCase().includes("วัคซีน") || query.toLowerCase().includes("vaccine");
-    const isClinicInfoQuery = query.toLowerCase().includes("เวลา") || query.toLowerCase().includes("เปิด") || query.toLowerCase().includes("ปิด") || query.toLowerCase().includes("ที่อยู่") || query.toLowerCase().includes("ติดต่อ") || query.toLowerCase().includes("เบอร์");
+    const isVaccineQuery =
+      query.toLowerCase().includes("วัคซีน") || query.toLowerCase().includes("vaccine");
     const priceKeywords = ["ราคา", "บาท", "price", "cost", "ตาราง", "แพ็กเกจ", "package"];
+    const queryKeywords = getQueryKeywords(query);
 
     const allFiles = allFilesRaw.map((fullFile: any) => {
-      if (!fullFile) return null;
-      
+      if (!fullFile || fullFile.status !== "active") return null;
+
       let score = 0;
-      // Note: New files might not have embeddings in the metadata key
+
       if (queryEmbedding && fullFile.embedding) {
-        score = cosineSimilarity(queryEmbedding, fullFile.embedding);
+        score += cosineSimilarity(queryEmbedding, fullFile.embedding) * 0.7;
       }
-      
-      // Always do a keyword fallback to boost relevance or handle missing embeddings
+
       const q = query.toLowerCase();
-      const keywords = q.split(/\s+/).filter(k => k.length > 1);
-      
-      // Check name
-      const fileName = fullFile.name.toLowerCase();
-      keywords.forEach(kw => {
-        if (fileName.includes(kw)) score += 0.15; // Increased weight
+      const fileName = String(fullFile.name || "").toLowerCase();
+      const preview = String(fullFile.contentPreview || "").toLowerCase();
+      const content = String(fullFile.content || "").toLowerCase();
+
+      queryKeywords.forEach((kw) => {
+        if (fileName.includes(kw)) score += 0.12;
+        if (preview.includes(kw)) score += 0.18;
+        if (content.includes(kw)) score += 0.08;
       });
-      if (fileName.includes(q)) score += 0.4; // Increased weight
 
-      // Special boost for price information if it's a vaccine query
+      if (fileName.includes(q)) score += 0.3;
+      if (preview.includes(q)) score += 0.35;
+      if (content.includes(q)) score += 0.25;
+
       if (isVaccineQuery) {
-        priceKeywords.forEach(pk => {
-          if (fileName.includes(pk)) score += 0.25;
+        priceKeywords.forEach((pk) => {
+          if (fileName.includes(pk)) score += 0.18;
+          if (preview.includes(pk)) score += 0.2;
+          if (content.includes(pk)) score += 0.1;
         });
       }
 
-      // Boost for general clinic info
-      if (isClinicInfoQuery) {
-        if (fileName.includes("เวลา") || fileName.includes("ติดต่อ") || fileName.includes("info")) score += 0.3;
-      }
+      if (fullFile.hasContent) score += 0.05;
+      if (fullFile.hasEmbedding) score += 0.05;
+      if (fullFile.processingStatus === "ready") score += 0.08;
 
-      // Check content if available in metadata (for old files)
-      if (fullFile.content) {
-        const content = fullFile.content.toLowerCase();
-        keywords.forEach(kw => {
-          if (content.includes(kw)) score += 0.08;
-        });
-        if (content.includes(q)) score += 0.25;
-        
-        // Special boost for price information in content if it's a vaccine query
-        if (isVaccineQuery) {
-          priceKeywords.forEach(pk => {
-            if (content.includes(pk)) score += 0.15;
-          });
-        }
-      }
-      
       return { ...fullFile, score };
     });
 
-    // Filter and sort by relevance
-    const topMetadata = allFiles
-      .filter(f => f !== null)
+    const relevantFiles = allFiles
+      .filter((f) => f !== null && (f.score > 0 || f.hasContent || f.hasEmbedding))
       .sort((a, b) => b.score - a.score)
-      .slice(0, isVaccineQuery ? 10 : 6); // Increased retrieval count
-
-    // Fetch full content for the top 5 relevant files
-    const relevantFiles = await Promise.all(topMetadata.map(async (meta: any) => {
-      // Try to fetch from the new 'content' key first
-      const fullData: any = await kv.get(`clinic_file_content:${meta.id}`);
-      if (fullData) {
-        return { ...fullData, score: meta.score };
-      }
-      // Fallback to the metadata key (for old files that have everything in one key)
-      return meta;
-    }));
+      .slice(0, isVaccineQuery ? 8 : 5);
 
     // 3. Prepare context with ONLY relevant files
     let textContext = "ข้อมูลเอกสารที่เกี่ยวข้องของคลินิก:\n";
@@ -642,12 +739,12 @@ app.post("/api/chat", async (req, res) => {
         }
         
         if (file.content) {
-          textContext += `--- เนื้อหาจากไฟล์ ${file.name} (ความเกี่ยวข้อง: ${Math.round(file.score * 100)}%) ---\n${file.content.substring(0, 3000)}\n\n`;
+          textContext += `--- เนื้อหาจากไฟล์ ${file.name} (ความเกี่ยวข้อง: ${Math.round(file.score * 100)}%) ---\n${buildRelevantSnippet(file.content, query, 3000)}\n\n`;
         }
         hasRelevantContent = true;
       } else {
         if (file.content) {
-          textContext += `--- เนื้อหาเอกสาร: ${file.name} (ความเกี่ยวข้อง: ${Math.round(file.score * 100)}%) ---\n${file.content.substring(0, 5000)}\n\n`;
+          textContext += `--- เนื้อหาเอกสาร: ${file.name} (ความเกี่ยวข้อง: ${Math.round(file.score * 100)}%) ---\n${buildRelevantSnippet(file.content, query, 3200)}\n\n`;
           hasRelevantContent = true;
         }
       }
@@ -681,38 +778,33 @@ app.post("/api/chat", async (req, res) => {
             contents: { parts: requestParts },
             config: {
               thinkingConfig: { thinkingLevel: ThinkingLevel.LOW }, // Phase 1: Reduce thinking latency
-              systemInstruction: `คุณคือ "ผู้ช่วยผู้เชี่ยวชาญด้านข้อมูลวัคซีนและภูมิคุ้มกันวิทยา" (Expert Vaccine Information Assistant) ประจำคลินิก
+              systemInstruction: `คุณคือ "ผู้ช่วยผู้เชี่ยวชาญด้านวัคซีนและภูมิคุ้มกันวิทยา" (Expert Vaccine & Immunology Assistant) ประจำคลินิก
               
-              บุคลิกภาพและโทนเสียง:
-              - มีความเป็นมืออาชีพสูง (Professional), น่าเชื่อถือ (Authoritative), แต่ยังคงความสุภาพและใส่ใจ (Empathetic)
-              - ใช้ภาษาที่ชัดเจน ถูกต้องตามหลักวิชาการ แต่เข้าใจง่ายสำหรับบุคคลทั่วไป
+              บุคลิกและโทนเสียง (Persona & Tone):
+              - มีความเป็นมืออาชีพสูง (Professional), แม่นยำ (Precise), และน่าเชื่อถือ (Authoritative)
+              - ใช้ภาษาที่สุภาพ เป็นทางการแต่เข้าใจง่าย (Empathetic & Clear)
+              - ให้ข้อมูลเชิงลึกเสมือนผู้เชี่ยวชาญ แต่ต้องอยู่ภายใต้ข้อมูลที่มีเท่านั้น
               
-              ข้อมูลสำคัญของคลินิก (System Knowledge):
-              - คลินิกรับบริการเฉพาะ Walk-in เท่านั้น (ไม่รับจองคิวล่วงหน้า)
-              - ให้บริการปรึกษาเรื่องวัคซีนและภูมิคุ้มกันวิทยาโดยเฉพาะ
+              กฎเหล็ก (Strict Rules - Mandatory):
+              1. ห้ามคิดคำตอบเอง (Strictly No Hallucination): ข้อมูลทุกอย่างต้องมีหลักฐานปรากฏใน "เอกสารที่เกี่ยวข้องของคลินิก" (Context) เท่านั้น
+              2. ห้ามใช้ความรู้ทั่วไปของ AI: แม้คุณจะมีความรู้เรื่องวัคซีนจากฐานข้อมูลเดิม แต่ห้ามนำมาใช้ตอบหากไม่มีระบุไว้ในเอกสารที่แนบมาในครั้งนี้
+              3. หากไม่มีข้อมูลในเอกสาร: ให้ตอบอย่างเป็นมืออาชีพว่า "จากการตรวจสอบฐานข้อมูลเอกสารทางการของคลินิกในขณะนี้ ไม่พบรายละเอียดเกี่ยวกับเรื่องดังกล่าว เพื่อข้อมูลที่ถูกต้องและเป็นปัจจุบันที่สุด แนะนำให้ท่านปรึกษาเจ้าหน้าที่หรือแพทย์ที่คลินิกโดยตรงค่ะ"
+              4. ห้ามคาดเดา: โดยเฉพาะเรื่องราคา (Price), ตารางนัด (Schedule), และข้อบ่งชี้ทางการแพทย์ (Medical Indications) ที่ไม่มีระบุไว้ชัดเจน
               
-              ขอบเขตและเป้าหมายหลัก (Boundaries & Goals):
-              1. **การตอบคำถามต้องอยู่บนพื้นฐานของหลักฐาน (Evidence-based)**: อ้างอิงข้อมูลจากเอกสารที่คัดเลือกมาให้ (Context) และข้อมูลสำคัญของคลินิก (System Knowledge) เท่านั้น
-              2. **ห้ามใช้ความรู้ทั่วไปของ AI (General Knowledge) ในการตอบคำถามเด็ดขาด**: คุณต้องทำหน้าที่เป็น "ผู้ถ่ายทอดข้อมูลจากเอกสาร" อย่างแม่นยำ หากในเอกสารไม่มีข้อมูลนั้น ให้แจ้งผู้ใช้ตามตรงว่าไม่มีข้อมูลในระบบ
-              3. **การให้ข้อมูลวัคซีน**: เมื่อตอบคำถามเกี่ยวกับวัคซีน หากข้อมูลมีในเอกสาร ให้ครอบคลุมประเด็นดังนี้ (ถ้ามี):
-                 - สรรพคุณหรือประโยชน์ของวัคซีน
-                 - กลุ่มเป้าหมายหรือผู้ที่ควรได้รับ
-                 - ตารางการฉีด (Schedule)
-                 - ราคาและแพ็กเกจ (Price & Packages) - **ต้องแจ้งเสมอหากมีข้อมูล**
-                 - ผลข้างเคียงที่อาจเกิดขึ้น
-              4. **การจัดการข้อมูลที่ขาดหาย**: หากข้อมูลในเอกสารไม่เพียงพอ ให้ตอบอย่างสุภาพว่า "ขออภัยค่ะ ข้อมูลที่ให้มาไม่เพียงพอที่จะตอบคำถามนี้ รบกวนติดต่อเจ้าหน้าที่คลินิกโดยตรงนะคะ" **ห้ามคาดเดาหรือคิดคำตอบเอง**
-              5. **ความขัดแย้งของข้อมูล**: หากข้อมูลในเอกสารหลายฉบับขัดแย้งกัน ให้ยึดตามเอกสารที่มีความเกี่ยวข้องสูงสุด (Score สูงสุด) หรือเอกสารที่ดูเป็นปัจจุบันที่สุด และระบุในคำตอบว่า "ข้อมูลจากเอกสารบางฉบับอาจมีความแตกต่างกัน"
-              6. **ห้ามให้คำแนะนำทางการแพทย์ที่อยู่นอกเหนือจากเอกสารเด็ดขาด**: หากผู้ป่วยมีอาการผิดปกติหรือต้องการการวินิจฉัย ให้แนะนำให้พบแพทย์ที่คลินิกทันที
+              ข้อมูลพื้นฐานของคลินิก (Core Knowledge):
+              - รูปแบบบริการ: รับเฉพาะ Walk-in เท่านั้น (No Appointment Required)
+              - ขอบเขตบริการ: ให้บริการปรึกษาและฉีดวัคซีน รวมถึงงานด้านภูมิคุ้มกันวิทยา
               
-              รูปแบบการตอบ:
-              - ตอบกลับด้วยภาษาเดียวกับที่ผู้ใช้ถาม (หากถามเป็นภาษาไทย ให้ตอบเป็นภาษาไทยที่สุภาพ มี ค่ะ/ครับ ตามความเหมาะสม, หากถามเป็นภาษาอังกฤษ ให้ตอบเป็นภาษาอังกฤษที่สุภาพและเป็นมืออาชีพ)
-              - จัดรูปแบบข้อความให้อ่านง่าย ใช้ Markdown (เช่น **ตัวหนา**, - Bullet points)
-              - ระบุชื่อไฟล์ที่ใช้อ้างอิงในคำตอบด้วย (ถ้ามี)
+              แนวทางการตอบ (Response Guidelines):
+              1. วิเคราะห์คำถามอย่างละเอียดและค้นหาข้อมูลที่ตรงประเด็นที่สุดจากเอกสาร
+              2. หากถามถึงวัคซีน: ต้องระบุชื่อวัคซีน, สรรพคุณ, ราคา (ถ้ามี), และข้อแนะนำเบื้องต้นตามที่เอกสารระบุ
+              3. การอ้างอิง: ต้องระบุชื่อไฟล์อ้างอิงทุกครั้งเพื่อให้ตรวจสอบย้อนกลับได้
+              4. รูปแบบ: ใช้ Markdown เพื่อความเป็นระเบียบ (หัวข้อ, ตัวหนา, รายการ)
               
               สำคัญมาก: ตอบกลับในรูปแบบ JSON ที่มีโครงสร้างดังนี้เท่านั้น:
               {
-                "answer": "คำตอบของคุณที่จัดรูปแบบด้วย Markdown",
-                "citations": [{"file_name": "ชื่อไฟล์อ้างอิง 1", "locator": "หน้า/หัวข้อ"}]
+                "answer": "คำตอบเชิงลึกแบบผู้เชี่ยวชาญในรูปแบบ Markdown",
+                "citations": [{"file_name": "ชื่อไฟล์อ้างอิง", "locator": "หัวข้อ/หน้า"}]
               }`,
               temperature: 0.0
             }
